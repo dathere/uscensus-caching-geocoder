@@ -29,6 +29,23 @@ pub enum BatchInputError {
     TooMany(usize),
 }
 
+/// Census's 400 body for a batch with a missing or invalid benchmark/vintage
+/// (`text/plain;charset=UTF-8`; captured 2026-10-12, `batch_err_params.txt`).
+pub const UPSTREAM_PARAM_ERROR: &str = r#"<p>While attempting to geocode your batch input, an error occurred validating and processing the parameters that were provided. </p> <p>Please validate the benchmark, vintage (if this is a geographies batch geocode request), and addressFile parameter values that are being used and retry your batch geocode request. </p> <p>More information and documentation (available in HTML and PDF formats) about the Census Geocoder and how to use it can be found here: <a href='https://geocoding.geo.census.gov/geocoder/'>https://geocoding.geo.census.gov/geocoder/</a></p>"#;
+
+/// Census's 400 body for a batch over the record limit, with the limit (`10,000`)
+/// substituted (captured 2026-10-12, `batch_err_toomany.txt`).
+pub fn upstream_too_many(limit: usize) -> String {
+    let n = format_thousands(limit);
+    format!(
+        r#"<p>An error occurred because the file submitted for batch geocoding exceeded the batch limit of {n} records.<br> Please modify the batch file so that it does not exceed {n} and resubmit the batch geocoding request. There is no limit as to how many batch geocoding requests you can submit, however each request must be limited to {n} records. <br> More information on how to use the Census Geocoder can be found in the API documentation at <a href='https://geocoding.geo.census.gov/geocoder/'>https://geocoding.geo.census.gov/geocoder/</a></p>"#
+    )
+}
+
+/// Fields read per record. Columns beyond a row type's width are ignored (as Census
+/// does); a record wider than this is malformed, so one huge row is never materialized.
+pub const MAX_INPUT_FIELDS: usize = 64;
+
 pub fn format_thousands(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::new();
@@ -197,19 +214,13 @@ fn is_blank(r: &[String]) -> bool {
     r.iter().all(|f| f.trim().is_empty())
 }
 
-/// `id, street, city, state, zip`; missing trailing fields are empty. Rows with more
-/// than five fields are malformed; blank rows are skipped.
 pub fn address_rows(records: Vec<Record>) -> Result<Vec<AddressRow>, BatchInputError> {
     let mut rows = Vec::with_capacity(records.len());
-    let mut bad = Vec::new();
     for (line, mut r) in records {
         if is_blank(&r) {
             continue;
         }
-        if r.len() > 5 {
-            bad.push(line);
-            continue;
-        }
+        // Extra columns are ignored, as Census does.
         r.resize(5, String::new());
         let mut it = r.into_iter();
         let mut next = || it.next().unwrap_or_default();
@@ -222,11 +233,7 @@ pub fn address_rows(records: Vec<Record>) -> Result<Vec<AddressRow>, BatchInputE
             zip: next(),
         });
     }
-    if bad.is_empty() {
-        Ok(rows)
-    } else {
-        Err(BatchInputError::Malformed(bad))
-    }
+    Ok(rows)
 }
 
 /// `id, x, y` with finite numeric coordinates.
@@ -237,7 +244,8 @@ pub fn coord_rows(records: Vec<Record>) -> Result<Vec<CoordRow>, BatchInputError
         if is_blank(&r) {
             continue;
         }
-        let parsed = (r.len() == 3)
+        // Extra columns are ignored, as Census does.
+        let parsed = (r.len() >= 3)
             .then(|| {
                 (
                     r[1].trim().parse::<f64>().ok(),
@@ -273,7 +281,7 @@ pub struct OnelineRow {
     pub address: String,
 }
 
-/// `id, address`; rows with more than two fields or an empty address are malformed.
+/// `id, address` (extra columns ignored); rows without an address are malformed.
 pub fn oneline_rows(records: Vec<Record>) -> Result<Vec<OnelineRow>, BatchInputError> {
     let mut rows = Vec::with_capacity(records.len());
     let mut bad = Vec::new();
@@ -282,7 +290,7 @@ pub fn oneline_rows(records: Vec<Record>) -> Result<Vec<OnelineRow>, BatchInputE
             continue;
         }
         match r.as_slice() {
-            [id, address] if !address.trim().is_empty() => rows.push(OnelineRow {
+            [id, address, ..] if !address.trim().is_empty() => rows.push(OnelineRow {
                 idx: u32::try_from(line).unwrap_or(u32::MAX),
                 user_id: id.clone(),
                 address: address.clone(),
@@ -660,14 +668,31 @@ mod tests {
     }
 
     #[test]
+    fn upstream_error_texts_match_captures() {
+        assert_eq!(
+            UPSTREAM_PARAM_ERROR.as_bytes(),
+            fixture("batch_err_params.txt").as_slice()
+        );
+        assert_eq!(
+            upstream_too_many(10_000).as_bytes(),
+            fixture("batch_err_toomany.txt").as_slice()
+        );
+        assert!(upstream_too_many(2).contains("batch limit of 2 records"));
+    }
+
+    #[test]
     fn input_validation() {
         assert_eq!(
             read_records(b"1,a,b,c,d\n\n2,a\n3,a,b,c,d,e\n", None, 10_000, 5),
             Err(BatchInputError::Malformed(vec![3])),
-            "over-wide rows are caught while reading"
+            "rows wider than the read limit are caught while reading"
         );
-        let recs = read_records(b"1,a,b,c,d,e\n", None, 10_000, 6).unwrap();
-        assert_eq!(address_rows(recs), Err(BatchInputError::Malformed(vec![1])));
+        // Columns beyond the row type's width are ignored, as Census does.
+        let recs = read_records(b"1,a,b,c,d,e,f\n", None, 10_000, MAX_INPUT_FIELDS).unwrap();
+        let rows = address_rows(recs).unwrap();
+        assert_eq!(rows[0].echo(), "a, b, c, d");
+        let recs = read_records(b"1,-1,2,x,y\n", None, 10_000, MAX_INPUT_FIELDS).unwrap();
+        assert_eq!(coord_rows(recs).unwrap()[0].y_raw, "2");
         let recs = read_records(b"1,a\n", None, 10_000, 5).unwrap();
         let rows = address_rows(recs).unwrap();
         assert_eq!((rows[0].street.as_str(), rows[0].zip.as_str()), ("a", ""));

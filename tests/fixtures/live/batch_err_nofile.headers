@@ -1,0 +1,12 @@
+HTTP/1.1 400 
+Content-Type: text/html;charset=UTF-8
+Connection: keep-alive
+X-Frame-Options: DENY
+Cache-Control: private, no-store
+Strict-Transport-Security: max-age=31536000
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1;mode=block
+Content-Language: en-US
+Vary: Origin
+Transfer-Encoding: chunked
+

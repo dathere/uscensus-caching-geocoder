@@ -264,10 +264,17 @@ async fn misses_are_chunked() {
     assert_eq!(up.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
 }
 
+/// Census's own texts for batch request errors (captured 2026-10-12, PLAN.md §11.5).
+fn assert_upstream_text(status: StatusCode, headers: &HeaderMap, body: &[u8], fixture_name: &str) {
+    assert_eq!(status, 400);
+    assert_eq!(headers["content-type"], "text/plain;charset=UTF-8");
+    assert_eq!(body, fixture(fixture_name).as_slice());
+}
+
 #[tokio::test]
 async fn input_validation_errors() {
     let h = harness(|c| c.batch.max_rows = 2).await;
-    let (status, _, body) = post(
+    let (status, headers, body) = post(
         &h,
         ADDR_GEO,
         "addressFile",
@@ -276,34 +283,72 @@ async fn input_validation_errors() {
     )
     .await;
     assert_eq!(status, 400);
-    assert_eq!(json(&body)["errors"][0], "Batch file exceeds 2 records");
+    assert_eq!(headers["content-type"], "text/plain;charset=UTF-8");
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("exceeded the batch limit of 2 records"),
+        "{text}"
+    );
 
+    // Missing/invalid benchmark or vintage: one generic Census body for all of them.
+    for (path, fields) in [
+        (ADDR_LOC, vec![]),
+        (ADDR_LOC, vec![("benchmark", "99999")]),
+        (ADDR_GEO, vec![("benchmark", "4")]),
+        (ADDR_GEO, vec![("benchmark", "4"), ("vintage", "99999")]),
+        (COORDS, vec![("benchmark", "4")]),
+    ] {
+        let (status, headers, body) = post(&h, path, "addressFile", b"1,a\n", &fields).await;
+        assert_upstream_text(status, &headers, &body, "batch_err_params.txt");
+    }
+
+    // Census renders its HTML form for a missing file; ours is a JSON 400.
+    let (status, _, body) = post(&h, ADDR_LOC, "otherField", b"1,a\n", &[("benchmark", "4")]).await;
+    assert_eq!(status, 400);
+    assert_eq!(json(&body)["errors"][0], "Batch file must be specified");
+    assert_eq!(h.hits().await, 0);
+}
+
+#[tokio::test]
+async fn empty_file_is_an_empty_200() {
+    let h = harness(|_| {}).await;
+    let (status, headers, body) =
+        post(&h, ADDR_LOC, "addressFile", b"", &[("benchmark", "4")]).await;
+    assert_eq!(status, 200);
+    assert!(body.is_empty());
+    assert_eq!(headers["content-type"], "text/plain");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=GeocodeResults.csv"
+    );
+    assert_eq!(h.hits().await, 0);
+}
+
+#[tokio::test]
+async fn extra_columns_are_ignored_like_census() {
+    let h = harness(|_| {}).await;
+    mock_post(
+        &h,
+        "/geographies/addressbatch",
+        br#""1","a, b, c, d","No_Match"
+"2","4600 Silver Hill Rd, Washington, DC, 20233","Match","Exact","4600 SILVER HILL RD, WASHINGTON, DC, 20233","-76.92836638093,38.84505589808","657091557","L","24","033","802405","2004"
+"#
+        .to_vec(),
+    )
+    .await;
     let (status, _, body) = post(
         &h,
         ADDR_LOC,
         "addressFile",
-        b"1,a,b,c,d,e,f\n",
+        &fixture("batch_widerow_in.csv"),
         &[("benchmark", "4")],
     )
     .await;
-    assert_eq!(status, 400);
-    assert_eq!(json(&body)["errors"][0], "Malformed rows: 1");
-
-    let (status, _, body) = post(&h, ADDR_LOC, "addressFile", b"1,a\n", &[]).await;
-    assert_eq!(status, 400);
-    assert_eq!(
-        body.as_ref(),
-        fixture("err_nobenchmark.json").trim_ascii_end()
-    );
-
-    let (status, _, body) =
-        post(&h, ADDR_GEO, "addressFile", b"1,a\n", &[("benchmark", "4")]).await;
-    assert_eq!(status, 400);
-    assert_eq!(
-        body.as_ref(),
-        fixture("err_novintage.json").trim_ascii_end()
-    );
-    assert_eq!(h.hits().await, 0);
+    assert_eq!(status, 200);
+    // Byte-identical to what Census answered for the same file.
+    assert_eq!(body.as_ref(), fixture("batch_widerow.csv"));
+    // Only the first five columns went upstream.
+    assert_eq!(uploads(&h).await[0][0], "1,a,b,c,d");
 }
 
 #[tokio::test]
@@ -453,7 +498,7 @@ async fn incomplete_or_garbled_upstream_output_is_a_502_not_no_match() {
 async fn oversized_upload_is_rejected_while_reading() {
     let h = harness(|_| {}).await;
     let huge = "1\n".repeat(2_000_000);
-    let (status, _, body) = post(
+    let (status, headers, body) = post(
         &h,
         ADDR_LOC,
         "addressFile",
@@ -461,11 +506,8 @@ async fn oversized_upload_is_rejected_while_reading() {
         &[("benchmark", "4")],
     )
     .await;
-    assert_eq!(status, 400);
-    assert_eq!(
-        json(&body)["errors"][0],
-        "Batch file exceeds 10,000 records"
-    );
+    // Census's own text, byte-for-byte at the default 10,000 limit.
+    assert_upstream_text(status, &headers, &body, "batch_err_toomany.txt");
     assert_eq!(h.hits().await, 0);
 }
 

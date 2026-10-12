@@ -26,7 +26,10 @@ use crate::{
     },
     catalog::{Benchmark, Catalog, Vintage},
     census::{
-        batch_csv::{BatchInputError, Record, RowResult, address_rows, coord_rows, read_records},
+        batch_csv::{
+            BatchInputError, MAX_INPUT_FIELDS, Record, RowResult, UPSTREAM_PARAM_ERROR,
+            address_rows, coord_rows, read_records, upstream_too_many,
+        },
         params::{MSG_NO_BENCHMARK, MSG_NO_VINTAGE},
         types::ReturnType,
     },
@@ -36,10 +39,6 @@ use crate::{
     upstream::{UpstreamError, batch::BatchEndpoint, throttle::Priority},
 };
 
-/// Input widths: `id, street, city, state, zip`, `id, x, y` and `id, address`.
-pub(crate) const ADDRESS_FIELDS: usize = 5;
-pub(crate) const COORDINATE_FIELDS: usize = 3;
-pub(crate) const ONELINE_FIELDS: usize = 2;
 pub(crate) const MSG_INVALID_BENCHMARK: &str = "Invalid benchmark in request";
 /// Unverified upstream text (PLAN.md §11.5).
 pub(crate) const MSG_INVALID_VINTAGE: &str = "Invalid vintage in request";
@@ -142,27 +141,70 @@ pub fn resolve_target(
 
 /// Parse the uploaded file off the async workers, enforcing the row limit while
 /// reading so oversized uploads are rejected before they are materialized.
+/// Census's own `text/plain` error body (mirrored byte-for-byte).
+fn upstream_text_error(body: String) -> Box<Response> {
+    let mut resp = (StatusCode::BAD_REQUEST, body).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain;charset=UTF-8"),
+    );
+    Box::new(resp)
+}
+
+/// Census answers an empty batch file with `200` and an empty body.
+fn empty_batch() -> Response {
+    let mut resp = StatusCode::OK.into_response();
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=GeocodeResults.csv"),
+    );
+    resp
+}
+
+/// Resolve a batch's benchmark/vintage; any problem is Census's generic parameter error.
+fn resolve_batch(
+    st: &SharedState,
+    up: &Upload,
+    rt: ReturnType,
+) -> Result<(Benchmark, Vintage), Box<Response>> {
+    resolve_target(
+        &st.catalog.load(),
+        up.field("benchmark"),
+        up.field("vintage"),
+        rt,
+    )
+    .map_err(|_| upstream_text_error(UPSTREAM_PARAM_ERROR.to_owned()))
+}
+
+/// Parse the uploaded file off the async workers, enforcing the row limit while
+/// reading so oversized uploads are rejected before they are materialized. Columns
+/// beyond the row type's width are ignored (as Census does). An empty file yields no
+/// rows (Census answers it with an empty `200`).
 pub(crate) async fn parse_rows<R: Send + 'static>(
     up: &Upload,
     parse: fn(Vec<Record>) -> Result<Vec<R>, BatchInputError>,
     max_rows: usize,
-    max_fields: usize,
 ) -> Result<Vec<R>, Box<Response>> {
     let Some((_, name, data)) = up.file.clone() else {
+        // Census renders its HTML form here; a JSON error is more useful.
         return Err(bad_request("Batch file must be specified"));
     };
     let parsed = tokio::task::spawn_blocking(move || {
-        read_records(&data, name.as_deref(), max_rows, max_fields).and_then(parse)
+        read_records(&data, name.as_deref(), max_rows, MAX_INPUT_FIELDS).and_then(parse)
     })
     .await
     .map_err(|e| {
         Box::new(AppError::Internal(anyhow::anyhow!("batch parse task: {e}")).into_response())
     })?;
-    let rows = parsed.map_err(|e| bad_request(e.to_string()))?;
-    if rows.is_empty() {
-        return Err(bad_request("Batch file contains no records"));
+    match parsed {
+        Ok(rows) => Ok(rows),
+        Err(BatchInputError::TooMany(limit)) => Err(upstream_text_error(upstream_too_many(limit))),
+        // Census answers malformed CSV with a 500 "cannot recover"; a 400 naming the
+        // rows is more truthful.
+        Err(e) => Err(bad_request(e.to_string())),
     }
-    Ok(rows)
 }
 
 /// The upstream endpoint, key need and upstream-vintage flag for an address batch.
@@ -198,12 +240,13 @@ async fn address_batch(
         Ok(u) => u,
         Err(r) => return *r,
     };
-    let (bench, vintage) = match resolve(&st, up.field("benchmark"), up.field("vintage"), rt) {
+    let (bench, vintage) = match resolve_batch(&st, &up, rt) {
         Ok(x) => x,
         Err(r) => return *r,
     };
     let max_rows = st.settings().config.batch.max_rows;
-    let rows = match parse_rows(&up, address_rows, max_rows, ADDRESS_FIELDS).await {
+    let rows = match parse_rows(&up, address_rows, max_rows).await {
+        Ok(r) if r.is_empty() => return empty_batch(),
         Ok(r) => r,
         Err(r) => return *r,
     };
@@ -225,17 +268,13 @@ async fn coordinates_batch(State(st): State<SharedState>, mp: Multipart) -> Resp
         Ok(u) => u,
         Err(r) => return *r,
     };
-    let (bench, vintage) = match resolve(
-        &st,
-        up.field("benchmark"),
-        up.field("vintage"),
-        ReturnType::Geographies,
-    ) {
+    let (bench, vintage) = match resolve_batch(&st, &up, ReturnType::Geographies) {
         Ok(x) => x,
         Err(r) => return *r,
     };
     let max_rows = st.settings().config.batch.max_rows;
-    let rows = match parse_rows(&up, coord_rows, max_rows, COORDINATE_FIELDS).await {
+    let rows = match parse_rows(&up, coord_rows, max_rows).await {
+        Ok(r) if r.is_empty() => return empty_batch(),
         Ok(r) => r,
         Err(r) => return *r,
     };

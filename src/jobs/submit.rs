@@ -60,13 +60,13 @@ pub fn inputs_from_file(
     filename: Option<&str>,
     search: &str,
 ) -> Result<Vec<(String, RowInput)>, String> {
-    use crate::{
-        census::batch_csv::{address_rows, coord_rows, oneline_rows, read_records},
-        http::batch::{ADDRESS_FIELDS, COORDINATE_FIELDS, ONELINE_FIELDS},
+    use crate::census::batch_csv::{
+        MAX_INPUT_FIELDS, address_rows, coord_rows, oneline_rows, read_records,
     };
-    let read = |width| read_records(data, filename, usize::MAX, width).map_err(|e| e.to_string());
+    let read =
+        || read_records(data, filename, usize::MAX, MAX_INPUT_FIELDS).map_err(|e| e.to_string());
     let inputs: Vec<(String, RowInput)> = match search {
-        "address" => address_rows(read(ADDRESS_FIELDS)?)
+        "address" => address_rows(read()?)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|r| {
@@ -81,12 +81,12 @@ pub fn inputs_from_file(
                 )
             })
             .collect(),
-        "onelineaddress" => oneline_rows(read(ONELINE_FIELDS)?)
+        "onelineaddress" => oneline_rows(read()?)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|r| (r.user_id, RowInput::Oneline { address: r.address }))
             .collect(),
-        "coordinates" => coord_rows(read(COORDINATE_FIELDS)?)
+        "coordinates" => coord_rows(read()?)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|r| {
