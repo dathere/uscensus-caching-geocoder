@@ -1,6 +1,7 @@
 //! HTTP surface: router assembly and the server loop.
 
 pub mod api_jobs;
+pub mod auth;
 pub mod batch;
 pub mod geocoder;
 
@@ -28,7 +29,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/healthz", get(healthz))
         .merge(geocoder::routes())
         .merge(batch::routes(max_body))
-        .merge(api_jobs::routes(max_body))
+        .merge(api_jobs::routes(state.clone(), max_body))
         .with_state(state)
 }
 

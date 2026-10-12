@@ -37,6 +37,8 @@ pub struct AppState {
     pub started_at: Instant,
     /// Wakes the job runner (new job, resume).
     pub jobs_notify: Notify,
+    /// Serializes refresh-negatives creation (check for an active run, then create).
+    pub refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -52,6 +54,7 @@ impl AppState {
             stats: Arc::new(StatsBuffer::default()),
             started_at: Instant::now(),
             jobs_notify: Notify::new(),
+            refresh_lock: tokio::sync::Mutex::new(()),
         })
     }
 

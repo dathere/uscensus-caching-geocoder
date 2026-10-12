@@ -382,18 +382,20 @@ impl UploadRows {
         }
     }
 
-    /// Upload (deduplicated by key) and return answers by key.
+    /// Upload (deduplicated by key) and return answers by key (see [`fetch_chunk`]).
     pub async fn fetch(
         &self,
         st: &AppState,
         t: &BatchTarget,
         source: impl Fn(&str, Status) -> EntrySource,
+        queue_negatives: bool,
     ) -> Result<HashMap<String, RowResult>, ChunkError> {
         async fn go<R: Row>(
             st: &AppState,
             t: &BatchTarget,
             rows: &[(R, String)],
             source: impl Fn(&str, Status) -> EntrySource,
+            queue_negatives: bool,
         ) -> Result<HashMap<String, RowResult>, ChunkError> {
             let mut seen = HashSet::new();
             let unique: Vec<(&R, &str)> = rows
@@ -404,17 +406,27 @@ impl UploadRows {
             if unique.is_empty() {
                 return Ok(HashMap::new());
             }
-            fetch_chunk(st, t, &unique, Priority::Background, source).await
+            fetch_chunk(
+                st,
+                t,
+                &unique,
+                Priority::Background,
+                source,
+                queue_negatives,
+            )
+            .await
         }
         match self {
-            Self::Address(rows) => go(st, t, rows, source).await,
-            Self::Coord(rows) => go(st, t, rows, source).await,
+            Self::Address(rows) => go(st, t, rows, source, queue_negatives).await,
+            Self::Coord(rows) => go(st, t, rows, source, queue_negatives).await,
         }
     }
 }
 
 /// Address and coordinate rows: re-check the cache (a previous attempt may have
 /// stored answers before it died), then upload the remaining misses as one batch.
+/// NoMatch re-checks are queued with the entries (in `fetch_chunk`), so a crash before
+/// this chunk's commit cannot lose them.
 async fn geocode_batch(
     st: &AppState,
     job: &JobRecord,
@@ -438,17 +450,12 @@ async fn geocode_batch(
         }
     }
     let fetched = UploadRows::build(misses.iter().copied())
-        .fetch(st, &t, |_, _| EntrySource::Job)
+        .fetch(st, &t, |_, _| EntrySource::Job, true)
         .await?;
-    let due = unix_now() + st.settings().config.retry.negative_delay.as_secs();
-    let mut queued = HashSet::new();
     for (i, _, key) in misses {
         let Some(result) = fetched.get(key) else {
             return Err(ExecError::Other(format!("no answer for row {i}")));
         };
-        if *result == RowResult::NoMatch && queued.insert(key) {
-            update.enqueue.push((key.to_owned(), due, 0));
-        }
         update
             .rows
             .push((i, RowState::Done, Some(result_status(result))));
@@ -504,9 +511,17 @@ async fn oneline(
         };
         match fetch.run().await {
             Ok(s) => update.rows.push((i, RowState::Done, Some(s.entry.status))),
-            Err(FetchFailure::Forward(r)) => {
+            // Census refused this row (4xx): retrying will not help.
+            Err(FetchFailure::Forward(r)) if r.status.is_client_error() => {
                 warn!(job = %job.id, row = i, status = %r.status, "upstream refused job row");
                 update.rows.push((i, RowState::Failed, None));
+            }
+            // An unparseable 200 (or other non-4xx answer) may be transient: retry the chunk.
+            Err(FetchFailure::Forward(r)) => {
+                return Err(ExecError::Other(format!(
+                    "unusable upstream answer (HTTP {}) for row {i}",
+                    r.status
+                )));
             }
             Err(FetchFailure::Exhausted(msg)) => return Err(ExecError::Other(msg)),
             Err(FetchFailure::BreakerOpen(d)) => {

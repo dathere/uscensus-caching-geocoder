@@ -24,6 +24,9 @@ pub enum SubmitError {
     /// The request is not acceptable (rendered as 400).
     #[error("{0}")]
     Invalid(String),
+    /// Conflicts with work already in progress (rendered as 409).
+    #[error("{0}")]
+    Busy(String),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]

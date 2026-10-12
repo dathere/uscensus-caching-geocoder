@@ -172,7 +172,9 @@ pub async fn lookup(
 }
 
 /// Upload one chunk of rows (`(row, key)`, distinct keys), store every answer with
-/// `source(key, status)` as its provenance, and return the answers by key.
+/// `source(key, status)` as its provenance, and return the answers by key. With
+/// `queue_negatives`, every NoMatch key is queued for a re-check (`retry.negative_delay`)
+/// in the same transaction that stores it.
 ///
 /// Upstream output is parsed strictly: an unparseable record or a submitted row missing
 /// from the response fails the whole chunk (never a fabricated `No_Match`). Storage
@@ -183,6 +185,7 @@ pub async fn fetch_chunk<R: Row>(
     rows: &[(&R, &str)],
     prio: Priority,
     source: impl Fn(&str, Status) -> EntrySource,
+    queue_negatives: bool,
 ) -> Result<HashMap<String, RowResult>, ChunkError> {
     let csv = R::upload(rows.iter().map(|(r, _)| *r));
     let vintage_param = t.upstream_vintage.then_some(t.vintage.id);
@@ -259,24 +262,28 @@ pub async fn fetch_chunk<R: Row>(
         ));
         results.insert((*key).to_owned(), result);
     }
-    let (codec, ttl_cfg, class) = (st.codec, st.settings().config.ttl.clone(), t.class);
+    let cfg = st.settings().config.clone();
+    let retries = if queue_negatives {
+        let due = verified_at + cfg.retry.negative_delay.as_secs();
+        results
+            .iter()
+            .filter(|(_, r)| **r == RowResult::NoMatch)
+            .map(|(k, _)| (k.clone(), due, 0))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (codec, ttl_cfg, class) = (st.codec, cfg.ttl, t.class);
     if let Err(e) = st
         .store
-        .put_entries_with(to_store, move |existing, entry| {
-            merge_batch(existing, entry, codec, &ttl_cfg, class, now)
-        })
+        .put_entries_with(
+            to_store,
+            move |existing, entry| merge_batch(existing, entry, codec, &ttl_cfg, class, now),
+            retries,
+        )
         .await
     {
         warn!(error = %e, "storing batch results failed; serving uncached");
     }
     Ok(results)
-}
-
-/// Queue batch/job NoMatch keys for a later re-check (`retry.negative_delay`).
-pub async fn enqueue_negatives(st: &AppState, keys: Vec<String>) {
-    let due = unix_now() + st.settings().config.retry.negative_delay.as_secs();
-    let items = keys.into_iter().map(|k| (k, due, 0)).collect();
-    if let Err(e) = st.store.retry_enqueue_many(items).await {
-        warn!(error = %e, "enqueueing No_Match retries failed");
-    }
 }

@@ -31,7 +31,8 @@ use crate::{
     state::SharedState,
 };
 
-pub fn routes(max_body_bytes: usize) -> Router<SharedState> {
+/// Token-protected (see [`super::auth`]).
+pub fn routes(state: SharedState, max_body_bytes: usize) -> Router<SharedState> {
     Router::new()
         .route("/api/v1/jobs", post(submit_job).get(list_jobs))
         .route("/api/v1/jobs/refresh-negatives", post(refresh_negatives))
@@ -41,6 +42,10 @@ pub fn routes(max_body_bytes: usize) -> Router<SharedState> {
         .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{id}/results", get(job_results))
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            super::auth::require_token,
+        ))
 }
 
 /// A job with derived progress.
@@ -165,6 +170,7 @@ impl JsonRow {
 fn submit_error(e: SubmitError) -> Response {
     match e {
         SubmitError::Invalid(msg) => AppError::BadRequest(msg).into_response(),
+        SubmitError::Busy(msg) => AppError::Conflict(msg).into_response(),
         SubmitError::Store(e) => AppError::Internal(e.into()).into_response(),
         SubmitError::Internal(e) => AppError::Internal(e).into_response(),
     }

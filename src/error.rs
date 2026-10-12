@@ -12,6 +12,9 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     NotFound(String),
+    /// Missing or wrong admin bearer token.
+    #[error("{0}")]
+    Unauthorized(String),
     /// The resource is in a state that does not allow the request.
     #[error("{0}")]
     Conflict(String),
@@ -33,6 +36,7 @@ impl AppError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -65,6 +69,9 @@ impl IntoResponse for AppError {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
+        if matches!(self, Self::Unauthorized(_)) {
+            headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
         if let Self::Unavailable {
             retry_after_secs: Some(secs),
             ..

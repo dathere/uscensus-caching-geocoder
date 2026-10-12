@@ -97,11 +97,14 @@ impl Store {
 
     /// Write many entries in one transaction, deciding each value inside the
     /// transaction: `f(existing, item)` returns the bytes to store, or `None` to leave
-    /// the existing value untouched. Atomic with respect to every other write.
+    /// the existing value untouched. `retries` (`(key, due, attempts)`) are queued in
+    /// the same transaction, so an answer is never stored without its re-check.
+    /// Atomic with respect to every other write.
     pub async fn put_entries_with<T: Send + Sync + 'static>(
         &self,
         items: Vec<(String, T)>,
         f: impl Fn(Option<&[u8]>, &T) -> Option<Vec<u8>> + Send + Sync + 'static,
+        retries: Vec<(String, u64, u8)>,
     ) -> Result<(), StoreError> {
         self.write(Box::new(move |ctx| {
             let t = ctx.entries()?;
@@ -109,6 +112,12 @@ impl Store {
                 let existing = t.get(k.as_str())?.map(|g| g.value().to_vec());
                 if let Some(v) = f(existing.as_deref(), item) {
                     t.insert(k.as_str(), v.as_slice())?;
+                }
+            }
+            if !retries.is_empty() {
+                let q = ctx.retry_queue()?;
+                for (key, due, attempts) in &retries {
+                    q.insert((*due, key.as_str()), *attempts)?;
                 }
             }
             Ok(())

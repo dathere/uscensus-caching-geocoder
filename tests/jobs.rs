@@ -711,3 +711,128 @@ async fn scheduler_creates_refresh_jobs_on_interval() {
     assert!(refresh.iter().all(|j| j.state == JobState::Completed));
     jobs.shutdown().await;
 }
+
+#[tokio::test]
+async fn job_routes_require_the_admin_token_when_set() {
+    let h = harness(|c| c.admin.token = Some("s3cret".into())).await;
+    let (status, headers, _) = h.get("/api/v1/jobs").await;
+    assert_eq!(status, 401);
+    assert_eq!(headers["www-authenticate"], "Bearer");
+    let (status, _, _) = send_json(&h, "/api/v1/jobs/refresh-negatives", &json!({})).await;
+    assert_eq!(status, 401);
+    let req = Request::get("/api/v1/jobs")
+        .header("authorization", "Bearer s3cret")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.request(req).await.0, 200);
+    let req = Request::get("/api/v1/jobs")
+        .header("authorization", "Bearer wrong")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.request(req).await.0, 401);
+}
+
+#[tokio::test]
+async fn batch_no_match_is_queued_with_its_entry_before_any_job_commit() {
+    use ucgeocoder::{
+        batch::{BatchTarget, fetch_chunk},
+        census::batch_csv::AddressRow,
+        upstream::{batch::BatchEndpoint, throttle::Priority},
+    };
+    let h = harness(|_| {}).await;
+    mount(&h, &Census::new()).await;
+    let catalog = h.state.catalog.load();
+    let t = BatchTarget {
+        bench: catalog.benchmark(4).unwrap().clone(),
+        vintage: catalog.vintage(4, 4).unwrap().clone(),
+        endpoint: BatchEndpoint::Address { geographies: true },
+        upstream_vintage: true,
+        class: catalog.class(4),
+    };
+    let row = AddressRow {
+        idx: 1,
+        user_id: "8".into(),
+        street: "zzzz nowhere".into(),
+        city: String::new(),
+        state: String::new(),
+        zip: String::new(),
+    };
+    let key = nowhere_key();
+    // What a job chunk does before its commit: if the process died right here, the
+    // stored No_Match must already carry its retry.
+    let out = fetch_chunk(
+        &h.state,
+        &t,
+        &[(&row, key.as_str())],
+        Priority::Background,
+        |_, _| EntrySource::Job,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(h.state.store.get_entry(&key).unwrap().is_some());
+    let due = h.state.store.retry_due(u64::MAX, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].key, key);
+}
+
+#[tokio::test]
+async fn overlapping_refresh_requests_are_refused() {
+    let h = harness(|c| c.retry.negative_delay = Duration::ZERO).await;
+    mount(&h, &Census::new()).await;
+    upload(
+        &h,
+        "/geocoder/locations/addressbatch",
+        "addressFile",
+        NOWHERE_ROW,
+        &[("benchmark", "4")],
+    )
+    .await;
+    // No runner yet: the first refresh job stays queued (active).
+    let (status, _, body) = send_json(&h, "/api/v1/jobs/refresh-negatives", &json!({})).await;
+    assert_eq!(status, 201);
+    assert_eq!(json(&body)["jobs"].as_array().unwrap().len(), 1);
+    let (status, _, body) = send_json(&h, "/api/v1/jobs/refresh-negatives", &json!({})).await;
+    assert_eq!(status, 409, "{}", String::from_utf8_lossy(&body));
+    let refresh = h
+        .state
+        .store
+        .job_list()
+        .unwrap()
+        .into_iter()
+        .filter(|j| j.kind == JobKind::RefreshNegatives)
+        .count();
+    assert_eq!(refresh, 1);
+}
+
+#[tokio::test]
+async fn unparseable_single_record_answer_retries_the_chunk() {
+    let h = harness(|_| {}).await;
+    h.mock_json(
+        "/geographies/onelineaddress",
+        fixture("geo_address_all.json"),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/geographies/onelineaddress"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("not json", "application/json"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    let (_, _, body) = send_json(
+        &h,
+        "/api/v1/jobs",
+        &json!({"returntype": "locations", "benchmark": "4", "rows": [{"id": 1, "address": "1 A St"}]}),
+    )
+    .await;
+    let id = id_of(&body);
+    let jobs = worker::spawn(h.state.clone());
+    let job = wait_for(&h, &id, finished).await;
+    assert_eq!(job.state, JobState::Completed);
+    assert_eq!((job.totals.matched, job.totals.failed), (1, 0));
+    let chunks = h.state.store.job_chunks(&id).unwrap();
+    assert_eq!(chunks[0].1.attempts, 1);
+    jobs.shutdown().await;
+}

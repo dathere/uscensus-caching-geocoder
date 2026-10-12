@@ -64,11 +64,24 @@ fn input_of(search_type: SearchType, canonical: &str) -> Option<RowInput> {
 }
 
 /// Create one refresh job per `(search type, benchmark, vintage)` group of due keys
-/// (deduplicated; a key keeps its highest attempt count).
+/// (deduplicated; a key keeps its highest attempt count). Refused while a refresh job
+/// is still active: overlapping runs would re-check the same keys with the same attempt
+/// counts, bypassing `retry.negative_delay` and undercounting attempts.
 pub async fn create_jobs(
     st: &AppState,
     filter: RefreshFilter,
 ) -> Result<Vec<JobRecord>, SubmitError> {
+    let _guard = st.refresh_lock.lock().await;
+    let active = st
+        .store
+        .job_list()?
+        .iter()
+        .any(|j| j.kind == JobKind::RefreshNegatives && j.state.is_active());
+    if active {
+        return Err(SubmitError::Busy(
+            "A refresh-negatives job is already active".into(),
+        ));
+    }
     let limit = filter.limit.unwrap_or(DEFAULT_LIMIT).max(1);
     let due = st.store.retry_due(unix_now(), usize::MAX)?;
     let mut attempts: HashMap<String, u8> = HashMap::new();
@@ -196,13 +209,18 @@ pub(crate) async fn execute(
 
     let t = target(st, job)?;
     let fetched = UploadRows::build(todo.iter().map(|(i, r)| (*i, &r.input, r.key.as_str())))
-        .fetch(st, &t, |key, status| {
-            if status == Status::NoMatch && finals.contains(key) {
-                EntrySource::Confirmed
-            } else {
-                EntrySource::Job
-            }
-        })
+        .fetch(
+            st,
+            &t,
+            |key, status| {
+                if status == Status::NoMatch && finals.contains(key) {
+                    EntrySource::Confirmed
+                } else {
+                    EntrySource::Job
+                }
+            },
+            false,
+        )
         .await?;
     let due = unix_now() + cfg.retry.negative_delay.as_secs();
     let mut requeued = HashSet::new();
@@ -247,15 +265,11 @@ async fn auto_refresh(st: &AppState) -> Result<usize, SubmitError> {
     if st.store.retry_due(unix_now(), 1)?.is_empty() {
         return Ok(0);
     }
-    let active = st
-        .store
-        .job_list()?
-        .iter()
-        .any(|j| j.kind == JobKind::RefreshNegatives && j.state.is_active());
-    if active {
-        return Ok(0);
+    match create_jobs(st, RefreshFilter::default()).await {
+        Ok(jobs) => Ok(jobs.len()),
+        Err(SubmitError::Busy(_)) => Ok(0),
+        Err(e) => Err(e),
     }
-    Ok(create_jobs(st, RefreshFilter::default()).await?.len())
 }
 
 #[cfg(test)]

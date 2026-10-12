@@ -18,7 +18,7 @@ use axum::{
 use tracing::warn;
 
 use crate::{
-    batch::{BatchTarget, ChunkError, Row, enqueue_negatives, fetch_chunk, lookup},
+    batch::{BatchTarget, ChunkError, Row, fetch_chunk, lookup},
     cache::{
         envelope::EntrySource,
         key::CacheKey,
@@ -323,20 +323,19 @@ async fn run_batch<R: Row>(
 
     let mut fetched: HashMap<String, RowResult> = HashMap::new();
     for chunk in misses.chunks(cfg.batch.chunk_size.max(1)) {
-        let results = match fetch_chunk(&st, &target, chunk, Priority::Sync, |_, _| {
-            EntrySource::Batch
-        })
+        let results = match fetch_chunk(
+            &st,
+            &target,
+            chunk,
+            Priority::Sync,
+            |_, _| EntrySource::Batch,
+            true,
+        )
         .await
         {
             Ok(r) => r,
             Err(e) => return chunk_error(e),
         };
-        let negatives = results
-            .iter()
-            .filter(|(_, r)| **r == RowResult::NoMatch)
-            .map(|(k, _)| k.clone())
-            .collect();
-        enqueue_negatives(&st, negatives).await;
         fetched.extend(results);
     }
 
