@@ -16,6 +16,7 @@ use ucgeocoder::{
     http::router,
     state::AppState,
     store::{Store, StoreOptions},
+    upstream::Upstream,
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_ucgeocoder");
@@ -37,7 +38,8 @@ async fn healthz_via_router() {
     let dir = tempfile::tempdir().unwrap();
     let store =
         Store::open(&StoreOptions::from(&settings.config.store).with_dir(dir.path())).unwrap();
-    let resp = router(AppState::new(settings, store))
+    let upstream = Upstream::new(&settings.config).unwrap();
+    let resp = router(AppState::new(settings, store, upstream))
         .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -45,7 +47,8 @@ async fn healthz_via_router() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "ok");
-    assert_eq!(v["breaker"], "closed");
+    assert_eq!(v["breaker"]["open"], false);
+    assert!(v["upstream_last_ok_at"].is_null());
     assert_eq!(v["db_ok"], true);
 }
 

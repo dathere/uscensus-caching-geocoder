@@ -24,9 +24,14 @@ xlsx = []
 anyhow = "1.0.104"
 arc-swap = "1.9.2"
 axum = "0.8"
+bytes = "1.12.1"
 clap = { version = "4", features = ["derive", "env"] }
+fastrand = "2.5.0"
+governor = "0.10"
+httpdate = "1.0.3"
 humantime = "2.4.0"
 redb = "4"
+reqwest = { version = "0.13", features = ["multipart", "json", "query", "gzip", "brotli", "zstd"] }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11.19"
@@ -45,3 +50,4 @@ http-body-util = "0.1.5"
 predicates = "3.1.4"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+wiremock = "0.6"

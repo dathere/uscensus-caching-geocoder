@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use crate::{
     config::Settings,
     store::{Store, stats::StatsBuffer},
+    upstream::Upstream,
 };
 
 pub type SharedState = Arc<AppState>;
@@ -14,13 +15,15 @@ pub type SharedState = Arc<AppState>;
 pub struct AppState {
     settings: ArcSwap<Settings>,
     pub store: Store,
+    pub upstream: Arc<Upstream>,
     pub stats: Arc<StatsBuffer>,
     pub started_at: Instant,
 }
 
 impl AppState {
-    pub fn new(settings: Settings, store: Store) -> SharedState {
+    pub fn new(settings: Settings, store: Store, upstream: Upstream) -> SharedState {
         Arc::new(Self {
+            upstream: Arc::new(upstream),
             settings: ArcSwap::from_pointee(settings),
             store,
             stats: Arc::new(StatsBuffer::default()),

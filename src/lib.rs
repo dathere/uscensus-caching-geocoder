@@ -10,6 +10,7 @@ pub mod http;
 pub mod state;
 pub mod store;
 pub mod telemetry;
+pub mod upstream;
 
 /// Crate version plus the git commit it was built from.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("UCG_GIT_SHA"), ")");

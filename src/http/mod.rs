@@ -13,6 +13,7 @@ use crate::{
     config::Settings,
     state::{AppState, SharedState},
     store::{Store, StoreOptions, stats::spawn_stats_flusher},
+    upstream::{Upstream, throttle::BreakerState},
 };
 
 pub fn router(state: SharedState) -> Router {
@@ -21,27 +22,33 @@ pub fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-/// `/healthz` body. `breaker` and `upstream_last_ok_at` are placeholders (`"closed"`,
-/// `null`) until the upstream client exists (Phase 4).
+/// `/healthz` body.
 #[derive(Debug, Serialize)]
 pub struct Health {
     pub status: &'static str,
     pub version: &'static str,
     pub uptime_secs: u64,
-    pub breaker: &'static str,
+    pub breaker: BreakerState,
     pub db_ok: Option<bool>,
     pub upstream_last_ok_at: Option<u64>,
 }
 
 async fn healthz(State(state): State<SharedState>) -> Json<Health> {
     let db_ok = state.store.is_healthy();
+    let breaker = state.upstream.throttle.breaker_state();
     Json(Health {
-        status: if db_ok { "ok" } else { "degraded" },
+        status: if !db_ok {
+            "degraded"
+        } else if breaker.open {
+            "upstream_unavailable"
+        } else {
+            "ok"
+        },
         version: VERSION,
         uptime_secs: state.started_at.elapsed().as_secs(),
-        breaker: "closed",
+        breaker,
         db_ok: Some(db_ok),
-        upstream_last_ok_at: None,
+        upstream_last_ok_at: state.upstream.last_ok_at(),
     })
 }
 
@@ -55,7 +62,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     }
     let store = Store::open(&StoreOptions::from(&cfg.store))?;
     info!(path = %store.path().display(), entries = store.entry_count()?, "store opened");
-    let state = AppState::new(settings, store);
+    let upstream = Upstream::new(&cfg)?;
+    let state = AppState::new(settings, store, upstream);
     let flusher = spawn_stats_flusher(
         state.store.clone(),
         state.stats.clone(),
