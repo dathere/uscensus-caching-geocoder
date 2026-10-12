@@ -13,7 +13,7 @@ use std::{
 use redb::{ReadableTable, ReadableTableMetadata};
 
 use super::{Store, StoreError, tables::ENTRIES};
-use crate::cache::envelope::{Header, Views, decode_stored};
+use crate::cache::envelope::{Header, decode_stored};
 
 /// Result of a conditional put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,31 +95,28 @@ impl Store {
         .await
     }
 
-    /// Insert `stored` unless, at commit time, the key already holds an entry that has
-    /// every view in `keep_views` and was created at or after `not_before`. The check
-    /// runs inside the write transaction, so it is atomic with respect to every other
-    /// write (including ones queued in the same batch).
-    pub async fn put_entry_unless_newer(
+    /// Insert `stored` unless, at commit time, the key holds a decodable entry for which
+    /// `keep(header, created_at)` is true. The check runs inside the write transaction,
+    /// so it sees every earlier write, including ones queued in the same batch.
+    pub async fn put_entry_unless(
         &self,
         key: String,
         stored: Vec<u8>,
-        keep_views: Views,
-        not_before: SystemTime,
+        keep: impl Fn(&Header, SystemTime) -> bool + Send + Sync + 'static,
     ) -> Result<PutOutcome, StoreError> {
         let kept = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&kept);
         self.write(Box::new(move |ctx| {
             let t = ctx.entries()?;
             let existing = t.get(key.as_str())?.map(|g| g.value().to_vec());
-            let keep = existing.is_some_and(|bytes| {
+            let keep_existing = existing.is_some_and(|bytes| {
                 decode_stored(&bytes).is_ok_and(|(envelope, created_at)| {
-                    created_at >= not_before
-                        && Header::parse(&envelope).is_ok_and(|h| h.views.contains(keep_views))
+                    Header::parse(&envelope).is_ok_and(|h| keep(&h, created_at))
                 })
             });
             // Ops may be re-run after a failed batch: always set the flag.
-            flag.store(keep, Ordering::SeqCst);
-            if !keep {
+            flag.store(keep_existing, Ordering::SeqCst);
+            if !keep_existing {
                 t.insert(key.as_str(), stored.as_slice())?;
             }
             Ok(())
@@ -305,6 +302,15 @@ mod tests {
         Header::parse(&env).unwrap().views
     }
 
+    /// Keep entries carrying GEO that are younger than a minute (stands in for the
+    /// cache layer's freshness predicate).
+    fn keep_fresh_geo(h: &Header, created_at: SystemTime) -> bool {
+        h.views.contains(crate::cache::envelope::Views::GEO)
+            && SystemTime::now()
+                .duration_since(created_at)
+                .is_ok_and(|age| age < std::time::Duration::from_secs(60))
+    }
+
     #[tokio::test]
     async fn conditional_put_is_atomic_within_one_batch_window() {
         use crate::cache::envelope::Views;
@@ -312,14 +318,16 @@ mod tests {
         let mut o = opts(dir.path());
         o.writer.flush = std::time::Duration::from_millis(50);
         let store = Store::open(&o).unwrap();
-        let fetch_started = SystemTime::now();
-        let geo = stored_with(Views::JSON | Views::GEO, SystemTime::now());
+        // Stamped before the locations fetch "started", committed in the same batch.
+        let geo = stored_with(
+            Views::JSON | Views::GEO,
+            SystemTime::now() - std::time::Duration::from_secs(1),
+        );
         let loc = stored_with(Views::JSON, SystemTime::now());
 
-        // Geographies write queued first, locations-only second, same transaction.
         let (a, b) = tokio::join!(
             store.put_entry("k".into(), geo.clone()),
-            store.put_entry_unless_newer("k".into(), loc.clone(), Views::GEO, fetch_started),
+            store.put_entry_unless("k".into(), loc.clone(), keep_fresh_geo),
         );
         a.unwrap();
         assert_eq!(b.unwrap(), PutOutcome::KeptExisting);
@@ -327,7 +335,7 @@ mod tests {
 
         // Opposite order: the locations-only write lands, then geographies replaces it.
         let (b, a) = tokio::join!(
-            store.put_entry_unless_newer("k2".into(), loc, Views::GEO, fetch_started),
+            store.put_entry_unless("k2".into(), loc, keep_fresh_geo),
             store.put_entry("k2".into(), geo),
         );
         assert_eq!(b.unwrap(), PutOutcome::Written);
@@ -336,25 +344,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conditional_put_replaces_older_or_insufficient_entries() {
+    async fn conditional_put_replaces_expired_or_insufficient_entries() {
         use crate::cache::envelope::Views;
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&opts(dir.path())).unwrap();
         let t0 = SystemTime::now();
-        let old_geo = stored_with(
+        let expired_geo = stored_with(
             Views::JSON | Views::GEO,
-            t0 - std::time::Duration::from_secs(60),
+            t0 - std::time::Duration::from_secs(3600),
         );
-        store.put_entry("old".into(), old_geo).await.unwrap();
+        store.put_entry("old".into(), expired_geo).await.unwrap();
         let loc = stored_with(Views::JSON, t0);
         let r = store
-            .put_entry_unless_newer("old".into(), loc.clone(), Views::GEO, t0)
+            .put_entry_unless("old".into(), loc.clone(), keep_fresh_geo)
             .await
             .unwrap();
         assert_eq!(
             r,
             PutOutcome::Written,
-            "an entry from before this fetch began is replaced"
+            "an expired geographies entry is replaced"
         );
 
         store
@@ -362,7 +370,7 @@ mod tests {
             .await
             .unwrap();
         let r = store
-            .put_entry_unless_newer("json".into(), loc, Views::GEO, t0)
+            .put_entry_unless("json".into(), loc.clone(), keep_fresh_geo)
             .await
             .unwrap();
         assert_eq!(
@@ -370,5 +378,11 @@ mod tests {
             PutOutcome::Written,
             "an entry without the GEO view is replaced"
         );
+
+        let r = store
+            .put_entry_unless("absent".into(), loc, keep_fresh_geo)
+            .await
+            .unwrap();
+        assert_eq!(r, PutOutcome::Written);
     }
 }

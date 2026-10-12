@@ -19,7 +19,7 @@ use crate::{
     cache::{
         envelope::{Entry, EntrySource, Status, UpstreamSingle, Views, encode_stored},
         key::{CacheKey, KeyInput},
-        policy::BenchmarkClass,
+        policy::{BenchmarkClass, Freshness, freshness, ttl},
         views::{Lookup, Need, Stored, classify},
     },
     catalog::Catalog,
@@ -295,7 +295,6 @@ impl FetchJob {
             }
         }
 
-        let fetch_started = SystemTime::now();
         let q = SingleQuery {
             input: &self.input,
             benchmark_id: self.benchmark_id,
@@ -342,10 +341,20 @@ impl FetchJob {
                     st.store.put_entry(key, value).await
                 } else {
                     // A locations-only fetch (fetch_geographies_always=false) must not
-                    // replace a geographies entry a concurrent fetch stored after this
-                    // one started; checked atomically inside the write transaction.
+                    // replace a still-fresh geographies entry (e.g. one a concurrent fetch
+                    // stored); checked atomically inside the write transaction.
+                    let ttl_cfg = st.settings().config.ttl.clone();
+                    let class = self.class;
                     st.store
-                        .put_entry_unless_newer(key, value, Views::GEO, fetch_started)
+                        .put_entry_unless(key, value, move |h, created_at| {
+                            h.views.contains(Views::GEO)
+                                && freshness(
+                                    created_at,
+                                    SystemTime::now(),
+                                    ttl(&ttl_cfg, h.status, h.source, class),
+                                    false,
+                                ) == Freshness::Fresh
+                        })
                         .await
                         .map(drop)
                 };
