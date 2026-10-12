@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::key::SearchType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ReturnType {
     Locations,

@@ -27,7 +27,7 @@ use super::codec::{Codec, CodecError, CodecKind};
 pub const FMT_VER: u8 = 1;
 pub const HEADER_LEN: usize = 17;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[repr(u8)]
 pub enum Status {
     Match = 0,
@@ -47,7 +47,7 @@ impl Status {
 }
 
 /// How an entry was produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[repr(u8)]
 pub enum EntrySource {
     Single = 0,
@@ -106,7 +106,7 @@ impl std::ops::BitOr for Views {
 }
 
 /// Batch CSV fields for one row. Strings are kept exactly as upstream wrote them.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BatchView {
     pub match_type: Option<String>,
     pub matched_address: Option<String>,

@@ -27,6 +27,8 @@ pub fn catalog_vintages_key(benchmark_id: u32) -> String {
 }
 
 pub struct AppState {
+    /// Settings from defaults, TOML, env and flags (no runtime overrides).
+    base: Settings,
     settings: ArcSwap<Settings>,
     pub store: Store,
     pub upstream: Arc<Upstream>,
@@ -39,13 +41,21 @@ pub struct AppState {
     pub jobs_notify: Notify,
     /// Serializes refresh-negatives creation (check for an active run, then create).
     pub refresh_lock: tokio::sync::Mutex<()>,
+    /// Serializes runtime config changes (read-modify-write of the overrides table).
+    pub config_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
     pub fn new(settings: Settings, store: Store, upstream: Upstream) -> SharedState {
+        crate::http::metrics::install();
         let catalog = load_catalog(&store);
+        let effective = with_stored_overrides(&settings, &store);
+        if effective != settings {
+            upstream.reconfigure(&effective.config);
+        }
         Arc::new(Self {
-            settings: ArcSwap::from_pointee(settings),
+            base: settings,
+            settings: ArcSwap::from_pointee(effective),
             store,
             upstream: Arc::new(upstream),
             catalog: ArcSwap::from_pointee(catalog),
@@ -55,6 +65,7 @@ impl AppState {
             started_at: Instant::now(),
             jobs_notify: Notify::new(),
             refresh_lock: tokio::sync::Mutex::new(()),
+            config_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -62,6 +73,39 @@ impl AppState {
     pub fn settings(&self) -> Arc<Settings> {
         self.settings.load_full()
     }
+
+    /// Settings before runtime overrides.
+    pub fn base_settings(&self) -> &Settings {
+        &self.base
+    }
+
+    /// Make `settings` effective now (hold `config_lock`): readers see them on their
+    /// next `settings()` call and the throttle/limiter is rebuilt.
+    pub fn apply_settings(&self, settings: Settings) {
+        self.upstream.reconfigure(&settings.config);
+        self.settings.store(Arc::new(settings));
+    }
+}
+
+/// `base` with the store's runtime overrides applied. An override that no longer applies
+/// (e.g. a key renamed in a newer build, or a value now invalid) is skipped with a warning
+/// rather than keeping the server from starting.
+fn with_stored_overrides(base: &Settings, store: &Store) -> Settings {
+    let overrides = match store.overrides() {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "reading runtime config overrides failed; using base settings");
+            return base.clone();
+        }
+    };
+    let mut current = base.clone();
+    for (path, json) in &overrides {
+        match current.with_overrides([(path.as_str(), json.as_str())]) {
+            Ok(next) => current = next,
+            Err(e) => warn!(key = %path, error = %e, "ignoring stored runtime override"),
+        }
+    }
+    current
 }
 
 /// The embedded snapshot, overlaid with any catalog bodies cached in the store

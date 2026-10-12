@@ -11,7 +11,17 @@ use std::fmt;
 pub const KEY_VERSION: &str = "v1";
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum SearchType {

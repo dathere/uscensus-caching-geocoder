@@ -31,6 +31,8 @@ enum Answer {
     Result(RowResult),
     Pending,
     Failed,
+    /// Answered, but the entry is gone and the row recorded no status.
+    Unknown,
 }
 
 impl Answer {
@@ -41,6 +43,7 @@ impl Answer {
             Self::Result(RowResult::Tie) => "Tie",
             Self::Pending => "Pending",
             Self::Failed => "Failed",
+            Self::Unknown => "Unknown",
         }
     }
 }
@@ -61,11 +64,12 @@ fn answer(st: &AppState, job: &JobRecord, row: &JobRow, bytes: Option<&[u8]>) ->
     }
     // The entry is gone or cannot render this row: say what the job recorded. A Match
     // then has no details (never invented).
-    Answer::Result(match row.status {
-        Some(Status::Match) => RowResult::Match(Box::default()),
-        Some(Status::Tie) => RowResult::Tie,
-        Some(Status::NoMatch) | None => RowResult::NoMatch,
-    })
+    match row.status {
+        Some(Status::Match) => Answer::Result(RowResult::Match(Box::default())),
+        Some(Status::Tie) => Answer::Result(RowResult::Tie),
+        Some(Status::NoMatch) => Answer::Result(RowResult::NoMatch),
+        None => Answer::Unknown,
+    }
 }
 
 fn input_json(input: &RowInput) -> Value {

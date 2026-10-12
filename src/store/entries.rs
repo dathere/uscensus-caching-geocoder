@@ -5,7 +5,7 @@ use std::{
     ops::Bound,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::SystemTime,
 };
@@ -14,6 +14,9 @@ use redb::{ReadableTable, ReadableTableMetadata};
 
 use super::{Store, StoreError, tables::ENTRIES};
 use crate::cache::envelope::{Header, decode_stored};
+
+/// `(key, stored bytes) -> selected`.
+pub type EntryPredicate = Arc<dyn Fn(&str, &[u8]) -> bool + Send + Sync>;
 
 /// Result of a conditional put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,13 +162,111 @@ impl Store {
         })
     }
 
-    pub async fn delete_entry(&self, key: String) -> Result<(), StoreError> {
+    /// `true` if the key existed.
+    pub async fn delete_entry(&self, key: String) -> Result<bool, StoreError> {
+        let existed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&existed);
         self.write(Box::new(move |ctx| {
-            ctx.entries()?.remove(key.as_str())?;
+            let found = ctx.entries()?.remove(key.as_str())?.is_some();
+            flag.store(found, Ordering::SeqCst);
             Ok(())
         }))
-        .await
+        .await?;
+        Ok(existed.load(Ordering::SeqCst))
     }
+
+    /// Count entries under `prefixes` (every entry when empty) for which
+    /// `pred(key, stored bytes)` holds, in one read transaction.
+    pub fn count_entries_where(
+        &self,
+        prefixes: &[String],
+        pred: &(dyn Fn(&str, &[u8]) -> bool + Sync),
+    ) -> Result<u64, StoreError> {
+        self.read(|txn| {
+            let t = txn.open_table(ENTRIES)?;
+            let mut n = 0u64;
+            let mut visit = |k: &str, v: &[u8]| {
+                if pred(k, v) {
+                    n += 1;
+                }
+            };
+            if prefixes.is_empty() {
+                for item in t.iter()? {
+                    let (k, v) = item?;
+                    visit(k.value(), v.value());
+                }
+            } else {
+                for p in prefixes {
+                    let end = prefix_end(p);
+                    for item in t.range::<&str>(bounds(p, end.as_deref()))? {
+                        let (k, v) = item?;
+                        visit(k.value(), v.value());
+                    }
+                }
+            }
+            Ok(n)
+        })
+    }
+
+    /// Delete entries under `prefixes` (every entry when empty) for which
+    /// `pred(key, stored bytes)` holds, deciding inside one write transaction.
+    pub async fn delete_entries_where(
+        &self,
+        prefixes: Vec<String>,
+        pred: EntryPredicate,
+    ) -> Result<u64, StoreError> {
+        let deleted = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&deleted);
+        self.write(Box::new(move |ctx| {
+            // Ops may be re-run after a failed batch: count this run only.
+            count.store(0, Ordering::SeqCst);
+            let t = ctx.entries()?;
+            let keep = |k: &str, v: &[u8]| {
+                let doomed = pred(k, v);
+                if doomed {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+                !doomed
+            };
+            if prefixes.is_empty() {
+                t.retain(|k, v| keep(k, v))?;
+            } else {
+                for p in &prefixes {
+                    let end = prefix_end(p);
+                    t.retain_in::<&str, _>(bounds(p, end.as_deref()), |k, v| keep(k, v))?;
+                }
+            }
+            Ok(())
+        }))
+        .await?;
+        Ok(deleted.load(Ordering::SeqCst))
+    }
+
+    /// redb statistics of the entries table (read-only; no write transaction).
+    pub fn entries_table_stats(&self) -> Result<redb::TableStats, StoreError> {
+        self.read(|txn| Ok(txn.open_table(ENTRIES)?.stats()?))
+    }
+}
+
+/// `[prefix, end)`, where `end` comes from [`prefix_end`].
+fn bounds<'a>(prefix: &'a str, end: Option<&'a str>) -> (Bound<&'a str>, Bound<&'a str>) {
+    (
+        Bound::Included(prefix),
+        end.map_or(Bound::Unbounded, Bound::Excluded),
+    )
+}
+
+/// The smallest string greater than every string starting with `prefix` (`None`: no
+/// upper bound).
+pub fn prefix_end(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        if let Some(next) = (u32::from(last) + 1..=u32::from(char::MAX)).find_map(char::from_u32) {
+            chars.push(next);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -1,15 +1,16 @@
-//! `/api/v1/jobs` (PLAN.md §6.3, §8). Auth and OpenAPI annotations arrive in Phase 8.
+//! `/api/v1/jobs` (PLAN.md §6.3, §8). Token-protected by the `/api/v1` router.
 
 use axum::{
-    Json, Router,
+    Json,
     body::Bytes,
-    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
+    extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::batch::{
     ADDRESS_FIELDS, COORDINATE_FIELDS, ONELINE_FIELDS, Upload, bad_request, parse_rows,
@@ -31,25 +32,21 @@ use crate::{
     state::SharedState,
 };
 
-/// Token-protected (see [`super::auth`]).
-pub fn routes(state: SharedState, max_body_bytes: usize) -> Router<SharedState> {
-    Router::new()
-        .route("/api/v1/jobs", post(submit_job).get(list_jobs))
-        .route("/api/v1/jobs/refresh-negatives", post(refresh_negatives))
-        .route("/api/v1/jobs/{id}", get(get_job).delete(delete_job))
-        .route("/api/v1/jobs/{id}/pause", post(pause_job))
-        .route("/api/v1/jobs/{id}/resume", post(resume_job))
-        .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
-        .route("/api/v1/jobs/{id}/results", get(job_results))
-        .layer(DefaultBodyLimit::max(max_body_bytes))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state,
-            super::auth::require_token,
-        ))
+pub const TAG: &str = "jobs";
+
+pub fn router() -> OpenApiRouter<SharedState> {
+    OpenApiRouter::new()
+        .routes(routes!(submit_job, list_jobs))
+        .routes(routes!(refresh_negatives))
+        .routes(routes!(get_job, delete_job))
+        .routes(routes!(pause_job))
+        .routes(routes!(resume_job))
+        .routes(routes!(cancel_job))
+        .routes(routes!(job_results))
 }
 
 /// A job with derived progress.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct JobView {
     #[serde(flatten)]
     pub job: JobRecord,
@@ -85,7 +82,7 @@ impl From<JobRecord> for JobView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SubmitResponse {
     pub id: String,
     pub state: JobState,
@@ -93,7 +90,7 @@ pub struct SubmitResponse {
 }
 
 /// JSON submission: one row shape per job.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SubmitJson {
     pub returntype: String,
     pub benchmark: String,
@@ -104,7 +101,9 @@ pub struct SubmitJson {
     pub rows: Vec<JsonRow>,
 }
 
-#[derive(Debug, Deserialize)]
+/// `{id, street, city?, state?, zip?}`, `{id, x, y}` or `{id, address}`; ids and
+/// coordinates may be strings or numbers.
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum JsonRow {
     Address {
@@ -167,6 +166,25 @@ impl JsonRow {
     }
 }
 
+/// Multipart submission (documentation only; parsed by hand).
+#[derive(Debug, ToSchema)]
+#[allow(dead_code, non_snake_case)]
+pub struct JobUpload {
+    /// `id, street, city, state, zip` (or `id, address` with `searchtype=onelineaddress`).
+    #[schema(value_type = Option<String>, format = Binary)]
+    addressFile: Option<Vec<u8>>,
+    /// `id, x, y`.
+    #[schema(value_type = Option<String>, format = Binary)]
+    coordinatesFile: Option<Vec<u8>>,
+    /// `locations` or `geographies`.
+    returntype: String,
+    /// `address` (default), `onelineaddress` or `coordinates`.
+    searchtype: Option<String>,
+    benchmark: String,
+    vintage: Option<String>,
+    priority: Option<i32>,
+}
+
 fn submit_error(e: SubmitError) -> Response {
     match e {
         SubmitError::Invalid(msg) => AppError::BadRequest(msg).into_response(),
@@ -181,6 +199,21 @@ fn parse_return_type(s: Option<&str>) -> Result<ReturnType, Box<Response>> {
         .ok_or_else(|| bad_request("returntype must be locations or geographies"))
 }
 
+/// Submit a job (multipart upload or JSON rows).
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs",
+    tag = TAG,
+    request_body(content(
+        (SubmitJson = "application/json"),
+        (JobUpload = "multipart/form-data")
+    )),
+    responses(
+        (status = 201, description = "Job created", body = SubmitResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Missing or wrong bearer token")
+    )
+)]
 async fn submit_job(State(st): State<SharedState>, req: Request) -> Response {
     let multipart = req
         .headers()
@@ -264,8 +297,18 @@ async fn from_multipart(st: &SharedState, mp: Multipart) -> Prepared {
         priority,
         filename,
     )?;
-    let inputs: Vec<(String, RowInput)> = match search {
-        "address" => parse_rows(&up, address_rows, usize::MAX, ADDRESS_FIELDS)
+    let inputs = inputs_from_upload(&up, search).await?;
+    Ok((spec, inputs))
+}
+
+/// Parse an uploaded job file (`search`: `address`, `onelineaddress` or `coordinates`)
+/// into job inputs.
+pub(crate) async fn inputs_from_upload(
+    up: &Upload,
+    search: &str,
+) -> Result<Vec<(String, RowInput)>, Box<Response>> {
+    Ok(match search {
+        "address" => parse_rows(up, address_rows, usize::MAX, ADDRESS_FIELDS)
             .await?
             .into_iter()
             .map(|r| {
@@ -280,12 +323,12 @@ async fn from_multipart(st: &SharedState, mp: Multipart) -> Prepared {
                 )
             })
             .collect(),
-        "onelineaddress" => parse_rows(&up, oneline_rows, usize::MAX, ONELINE_FIELDS)
+        "onelineaddress" => parse_rows(up, oneline_rows, usize::MAX, ONELINE_FIELDS)
             .await?
             .into_iter()
             .map(|r| (r.user_id, RowInput::Oneline { address: r.address }))
             .collect(),
-        "coordinates" => parse_rows(&up, coord_rows, usize::MAX, COORDINATE_FIELDS)
+        "coordinates" => parse_rows(up, coord_rows, usize::MAX, COORDINATE_FIELDS)
             .await?
             .into_iter()
             .map(|r| {
@@ -303,8 +346,7 @@ async fn from_multipart(st: &SharedState, mp: Multipart) -> Prepared {
                 "searchtype must be address, onelineaddress or coordinates",
             ));
         }
-    };
-    Ok((spec, inputs))
+    })
 }
 
 fn from_json(st: &SharedState, body: SubmitJson) -> Prepared {
@@ -323,7 +365,8 @@ fn from_json(st: &SharedState, body: SubmitJson) -> Prepared {
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub state: Option<JobState>,
     pub limit: Option<usize>,
@@ -331,12 +374,20 @@ pub struct ListQuery {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct JobList {
     pub jobs: Vec<JobView>,
     pub next_cursor: Option<String>,
 }
 
+/// List jobs, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs",
+    tag = TAG,
+    params(ListQuery),
+    responses((status = 200, body = JobList))
+)]
 async fn list_jobs(State(st): State<SharedState>, Query(q): Query<ListQuery>) -> Response {
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     let all = match st.store.job_list() {
@@ -367,6 +418,14 @@ fn not_found() -> Response {
     AppError::NotFound("Job not found".into()).into_response()
 }
 
+/// One job with progress and ETA.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{id}",
+    tag = TAG,
+    params(("id" = String, Path, description = "Job id")),
+    responses((status = 200, body = JobView), (status = 404, description = "No such job"))
+)]
 async fn get_job(State(st): State<SharedState>, Path(id): Path<String>) -> Response {
     match st.store.job_get(&id) {
         Ok(Some(j)) => Json(JobView::from(j)).into_response(),
@@ -375,6 +434,14 @@ async fn get_job(State(st): State<SharedState>, Path(id): Path<String>) -> Respo
     }
 }
 
+/// Delete a job with its rows (cached answers stay).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/jobs/{id}",
+    tag = TAG,
+    params(("id" = String, Path, description = "Job id")),
+    responses((status = 204, description = "Deleted"), (status = 404, description = "No such job"))
+)]
 async fn delete_job(State(st): State<SharedState>, Path(id): Path<String>) -> Response {
     match st.store.job_delete(id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -406,6 +473,18 @@ fn state_name(s: JobState) -> String {
         .unwrap_or_default()
 }
 
+/// Pause a queued or running job (the chunk in flight finishes).
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{id}/pause",
+    tag = TAG,
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, body = JobView),
+        (status = 404, description = "No such job"),
+        (status = 409, description = "Not allowed in the job's state")
+    )
+)]
 async fn pause_job(State(st): State<SharedState>, Path(id): Path<String>) -> Response {
     transition(&st, id, |j| {
         if !j.state.is_runnable() {
@@ -418,6 +497,18 @@ async fn pause_job(State(st): State<SharedState>, Path(id): Path<String>) -> Res
     .await
 }
 
+/// Resume a paused job.
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{id}/resume",
+    tag = TAG,
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, body = JobView),
+        (status = 404, description = "No such job"),
+        (status = 409, description = "Not allowed in the job's state")
+    )
+)]
 async fn resume_job(State(st): State<SharedState>, Path(id): Path<String>) -> Response {
     transition(&st, id, |j| {
         if j.state != JobState::Paused {
@@ -434,6 +525,18 @@ async fn resume_job(State(st): State<SharedState>, Path(id): Path<String>) -> Re
     .await
 }
 
+/// Cancel a job; pending rows stay pending.
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{id}/cancel",
+    tag = TAG,
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, body = JobView),
+        (status = 404, description = "No such job"),
+        (status = 409, description = "Not allowed in the job's state")
+    )
+)]
 async fn cancel_job(State(st): State<SharedState>, Path(id): Path<String>) -> Response {
     transition(&st, id, |j| {
         if !j.state.is_active() {
@@ -448,13 +551,29 @@ async fn cancel_job(State(st): State<SharedState>, Path(id): Path<String>) -> Re
     .await
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ResultsQuery {
+    /// `csv` (default) or `json` (JSON lines).
     pub format: Option<String>,
     /// `unmatched`: only rows that are not a Match.
     pub only: Option<String>,
 }
 
+/// Rows joined with the current cache entries, as batch CSV or JSON lines.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{id}/results",
+    tag = TAG,
+    params(("id" = String, Path, description = "Job id"), ResultsQuery),
+    responses(
+        (status = 200, description = "Results", content(
+            (String = "text/plain"),
+            (String = "application/x-ndjson")
+        )),
+        (status = 404, description = "No such job")
+    )
+)]
 async fn job_results(
     State(st): State<SharedState>,
     Path(id): Path<String>,
@@ -500,18 +619,30 @@ async fn job_results(
     resp
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub benchmark: Option<String>,
     pub vintage: Option<String>,
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RefreshResponse {
     pub jobs: Vec<JobView>,
 }
 
+/// Create refresh-negatives jobs for due NoMatch keys (409 while one is active).
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/refresh-negatives",
+    tag = TAG,
+    request_body(content = Option<RefreshRequest>, content_type = "application/json"),
+    responses(
+        (status = 201, body = RefreshResponse),
+        (status = 400, description = "Invalid filter"),
+        (status = 409, description = "A refresh job is already active")
+    )
+)]
 async fn refresh_negatives(State(st): State<SharedState>, body: Bytes) -> Response {
     let req: RefreshRequest = if body.iter().all(u8::is_ascii_whitespace) {
         RefreshRequest::default()

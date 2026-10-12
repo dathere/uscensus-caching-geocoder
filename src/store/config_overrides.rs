@@ -26,6 +26,18 @@ impl Store {
         .await
     }
 
+    /// Set several overrides in one transaction.
+    pub async fn set_overrides(&self, items: Vec<(String, String)>) -> Result<(), StoreError> {
+        self.write(Box::new(move |ctx| {
+            let t = ctx.config_overrides()?;
+            for (path, json) in &items {
+                t.insert(path.as_str(), json.as_str())?;
+            }
+            Ok(())
+        }))
+        .await
+    }
+
     pub async fn delete_override(&self, path: String) -> Result<(), StoreError> {
         self.write(Box::new(move |ctx| {
             ctx.config_overrides()?.remove(path.as_str())?;

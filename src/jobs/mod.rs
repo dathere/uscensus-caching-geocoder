@@ -18,7 +18,7 @@ use crate::{
     census::types::ReturnType,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Geocode,
@@ -27,7 +27,7 @@ pub enum JobKind {
     Warm,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
@@ -52,7 +52,7 @@ impl JobState {
 
 /// Row tallies. `total = matched + no_match + tie + pending + failed`; `cached` counts
 /// the answered rows that came from the cache rather than this job's upstream calls.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Counts {
     pub total: u64,
     pub cached: u64,
@@ -99,7 +99,7 @@ impl Counts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct JobRecord {
     /// UUIDv7: ids sort by creation time.
     pub id: String,
@@ -217,7 +217,7 @@ pub fn parse_coords(x: &str, y: &str) -> Option<(f64, f64)> {
     (x.is_finite() && y.is_finite()).then_some((x, y))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RowState {
     Pending,
@@ -239,7 +239,7 @@ pub struct JobRow {
     pub attempts: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkStatus {
     Pending,

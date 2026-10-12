@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, fmt, net::SocketAddr, path::PathBuf, time::Dura
 use serde::Serialize;
 
 /// Where the effective value of a key came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Default,
@@ -506,7 +506,7 @@ impl Settings {
 }
 
 /// Rendered view of one key.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct FieldReport {
     pub path: &'static str,
     pub value: String,
@@ -552,6 +552,62 @@ pub fn load(layers: &Layers<'_>) -> Result<Settings, ConfigError> {
 
     s.config.validate()?;
     Ok(s)
+}
+
+/// Sections a runtime override (`PUT /api/v1/config`) may change. The listener, store,
+/// upstream endpoints, admin auth and logging are fixed at startup, so overriding them
+/// would silently do nothing; they are refused instead.
+pub const OVERRIDABLE_SECTIONS: &[&str] = &["cache", "ttl", "retry", "batch", "jobs", "throttle"];
+
+pub fn is_overridable(path: &str) -> bool {
+    path.split_once('.')
+        .is_some_and(|(section, _)| OVERRIDABLE_SECTIONS.contains(&section))
+        && FIELDS.iter().any(|f| f.path == path)
+}
+
+/// The text a key parses from a stored JSON override value (string, number or bool).
+pub fn override_text(json: &str) -> Result<String, String> {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::String(s)) => Ok(s),
+        Ok(v @ (serde_json::Value::Number(_) | serde_json::Value::Bool(_))) => Ok(v.to_string()),
+        Ok(other) => Err(format!(
+            "expected a string, number or boolean, got `{other}`"
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+impl Settings {
+    /// These settings with runtime overrides (`(dotted path, JSON value)`) applied as
+    /// [`Source::Override`], then validated.
+    pub fn with_overrides<'a>(
+        &self,
+        overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, ConfigError> {
+        let mut s = self.clone();
+        for (path, json) in overrides {
+            let invalid = |msg: String| ConfigError::Invalid {
+                key: path.to_owned(),
+                origin: "runtime override".into(),
+                msg,
+            };
+            if !FIELDS.iter().any(|f| f.path == path) {
+                return Err(ConfigError::UnknownKey(path.to_owned()));
+            }
+            if !is_overridable(path) {
+                return Err(invalid("cannot be changed at runtime".into()));
+            }
+            let text = override_text(json).map_err(invalid)?;
+            s.set(
+                path,
+                RawValue::Str(&text),
+                "runtime override",
+                Source::Override,
+            )?;
+        }
+        s.config.validate()?;
+        Ok(s)
+    }
 }
 
 impl Config {
@@ -790,5 +846,53 @@ mod tests {
                 f.path
             );
         }
+    }
+
+    #[test]
+    fn runtime_overrides() {
+        let base = load(&Layers {
+            toml: None,
+            env: &no_env,
+            flags: &[],
+        })
+        .unwrap();
+        let s = base
+            .with_overrides([
+                ("throttle.single_rps", "2"),
+                ("ttl.tie", "\"7d\""),
+                ("cache.serve_stale_on_error", "false"),
+            ])
+            .unwrap();
+        assert_eq!(s.config.throttle.single_rps, 2);
+        assert_eq!(s.config.ttl.tie, Duration::from_secs(7 * 86_400));
+        assert!(!s.config.cache.serve_stale_on_error);
+        assert_eq!(
+            s.provenance.get("throttle.single_rps"),
+            Some(Source::Override)
+        );
+        assert_eq!(
+            s.provenance.get("throttle.single_burst"),
+            Some(Source::Default)
+        );
+
+        assert!(matches!(
+            base.with_overrides([("server.bind", "\"0.0.0.0:1\"")]),
+            Err(ConfigError::Invalid { .. })
+        ));
+        assert!(matches!(
+            base.with_overrides([("nope.key", "1")]),
+            Err(ConfigError::UnknownKey(_))
+        ));
+        assert!(matches!(
+            base.with_overrides([("throttle.single_rps", "0")]),
+            Err(ConfigError::Validation(_))
+        ));
+        assert!(
+            base.with_overrides([("throttle.single_rps", "[1]")])
+                .is_err()
+        );
+        assert!(is_overridable("jobs.chunk_size"));
+        assert!(!is_overridable("admin.token"));
+        assert!(!is_overridable("throttle.nope"));
     }
 }

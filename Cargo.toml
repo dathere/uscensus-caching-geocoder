@@ -30,10 +30,13 @@ clap = { version = "4", features = ["derive", "env"] }
 csv = "1.4.0"
 fastrand = "2.5.0"
 form_urlencoded = "1.2.2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 governor = "0.10"
 httpdate = "1.0.3"
 humantime = "2.4.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 redb = "4"
 reqwest = { version = "0.13", features = ["multipart", "json", "query", "gzip", "brotli", "zstd"] }
 rmp-serde = "1"
@@ -45,6 +48,8 @@ tokio = { version = "1", features = ["full"] }
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+utoipa = { version = "6", features = ["preserve_order", "preserve_path_order", "axum_extras"] }
+utoipa-axum = "0.3"
 uuid = { version = "1.28.0", features = ["v7"] }
 zstd = "0.14"
 
@@ -54,6 +59,7 @@ cached = { version = "4", default-features = false, features = ["redb_store"] }
 futures-util = "0.3.34"
 http-body-util = "0.1.5"
 predicates = "3.1.4"
+serde_bytes = "0.11.19"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6"

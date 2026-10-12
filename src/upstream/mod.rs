@@ -54,7 +54,7 @@ pub enum UpstreamError {
     Exhausted { attempts: u32, last: String },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ErrorRecord {
     /// Unix seconds.
     pub at: u64,

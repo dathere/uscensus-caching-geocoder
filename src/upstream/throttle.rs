@@ -59,7 +59,7 @@ impl Breaker {
 }
 
 /// Snapshot of the breaker for health/admin endpoints.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct BreakerState {
     pub open: bool,
     pub consecutive_failures: u32,

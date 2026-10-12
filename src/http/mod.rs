@@ -1,14 +1,25 @@
 //! HTTP surface: router assembly and the server loop.
 
+pub mod api_admin;
+pub mod api_cache;
 pub mod api_jobs;
 pub mod auth;
 pub mod batch;
 pub mod geocoder;
+pub mod metrics;
+pub mod openapi;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderValue, header},
+    middleware::from_fn_with_state,
+    response::IntoResponse,
+    routing::get,
+};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -25,11 +36,39 @@ pub fn router(state: SharedState) -> Router {
     let max_body = usize::try_from(state.settings().config.server.max_body_mb)
         .unwrap_or(usize::MAX)
         .saturating_mul(1024 * 1024);
+    let (api, spec) = openapi::api();
+    let api = api
+        .layer(DefaultBodyLimit::max(max_body))
+        .route_layer(from_fn_with_state(state.clone(), auth::require_token));
+    let spec: Arc<str> = spec
+        .to_pretty_json()
+        .expect("the OpenAPI document serializes")
+        .into();
     Router::new()
         .route("/healthz", get(healthz))
-        .merge(geocoder::routes())
-        .merge(batch::routes(max_body))
-        .merge(api_jobs::routes(state.clone(), max_body))
+        .route(
+            openapi::SPEC_PATH,
+            get(move || {
+                let spec = Arc::clone(&spec);
+                async move {
+                    (
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        )],
+                        spec.to_string(),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .route("/metrics", get(metrics::metrics))
+        .merge(
+            geocoder::routes()
+                .merge(batch::routes(max_body))
+                .route_layer(axum::middleware::from_fn(metrics::count_requests)),
+        )
+        .merge(api)
         .with_state(state)
 }
 
