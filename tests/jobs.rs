@@ -921,8 +921,11 @@ async fn a_stale_refresh_job_does_not_recheck_a_key_its_cancelled_twin_handled()
     jobs.shutdown().await;
 }
 
+/// A refresh interrupted mid-upload (before any answer arrives) is re-run exactly once
+/// after reopening, and counts one attempt. The commit boundary itself needs no test of
+/// its own: entries, queue changes and the job checkpoint are a single transaction.
 #[tokio::test]
-async fn an_interrupted_refresh_leaves_no_partial_progress() {
+async fn an_interrupted_refresh_upload_is_rerun_once_after_restart() {
     let h = harness(|_| {}).await;
     let mut census = Census::new();
     census.fast = 1; // the refresh upload hangs
