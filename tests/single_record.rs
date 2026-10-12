@@ -405,3 +405,100 @@ async fn flat_extension_via_header() {
     assert_eq!(v["result"]["flat"]["States"]["STUSAB"], "MD");
     assert_eq!(v["result"]["flat"]["Counties"]["GEOID"], "24033");
 }
+
+#[tokio::test]
+async fn slow_locations_fetch_does_not_clobber_geographies_entry() {
+    let h = harness(|c| c.cache.fetch_geographies_always = false).await;
+    let mut loc =
+        serde_json::from_slice::<serde_json::Value>(&fixture("loc_address.json")).unwrap();
+    loc["result"]["input"]["address"] = serde_json::json!({"street": "4600 Silver Hill Rd"});
+    Mock::given(method("GET"))
+        .and(path("/locations/address"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(serde_json::to_vec(&loc).unwrap(), "application/json")
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/geographies/address"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(fixture("geo_address_all.json"), "application/json")
+                .set_delay(Duration::from_millis(50)),
+        )
+        .mount(&h.server)
+        .await;
+    let loc_q = "/geocoder/locations/address?street=4600+Silver+Hill+Rd&city=Washington&state=DC&benchmark=4&format=json";
+    let (a, b) = tokio::join!(h.get(loc_q), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        h.get(ADDR_GEO).await
+    });
+    assert_eq!((a.0.as_u16(), b.0.as_u16()), (200, 200));
+    let (_, headers, _) = h.get(ADDR_GEO).await;
+    assert_eq!(
+        x_cache(&headers),
+        "HIT",
+        "geographies entry survived the slower locations write"
+    );
+    assert_eq!(h.hits().await, 2);
+}
+
+#[tokio::test]
+async fn malformed_catalog_200_does_not_replace_valid_document() {
+    let h = harness(|c| c.ttl.catalog = Duration::from_secs(1)).await;
+    Mock::given(method("GET"))
+        .and(path("/benchmarks"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(fixture("benchmarks.json"), "application/json"),
+        )
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/benchmarks"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("null", "application/json"))
+        .mount(&h.server)
+        .await;
+    h.get("/geocoder/benchmarks").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (_, headers, body) = h.get("/geocoder/benchmarks").await;
+    assert_eq!(x_cache(&headers), "STALE");
+    assert_eq!(body.as_ref(), fixture("benchmarks.json").trim_ascii_end());
+    let (raw, _) = h.state.store.catalog_get("benchmarks").unwrap().unwrap();
+    assert_eq!(
+        raw,
+        fixture("benchmarks.json"),
+        "valid document kept in the store"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_vintage_refreshes_both_land_in_the_catalog() {
+    let h = harness(|_| {}).await;
+    let mut v8: serde_json::Value = serde_json::from_slice(&fixture("vintages_4.json")).unwrap();
+    v8["vintages"] = serde_json::json!([{"isDefault": true, "id": "8", "vintageName": "Test_Eight", "vintageDescription": "x"}]);
+    for (bench, body, delay) in [
+        ("4", fixture("vintages_4.json"), 150),
+        ("8", serde_json::to_vec(&v8).unwrap(), 10),
+    ] {
+        Mock::given(method("GET"))
+            .and(path("/vintages"))
+            .and(query_param("benchmark", bench))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(body, "application/json")
+                    .set_delay(Duration::from_millis(delay)),
+            )
+            .mount(&h.server)
+            .await;
+    }
+    tokio::join!(
+        h.get("/geocoder/vintages?benchmark=4"),
+        h.get("/geocoder/vintages?benchmark=8")
+    );
+    let c = h.state.catalog.load();
+    assert_eq!(c.resolve_vintage(8, "Test_Eight").map(|v| v.id), Some(8));
+    assert!(c.resolve_vintage(4, "ACS2026_Current").is_some());
+}

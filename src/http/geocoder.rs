@@ -333,6 +333,23 @@ impl FetchJob {
             entry.views = entry.views | Views::BATCH;
         }
         let now = SystemTime::now();
+        // A locations-only fetch (fetch_geographies_always=false) must not replace a
+        // fresh geographies entry that a concurrent fetch stored meanwhile.
+        if !self.fetch_geo
+            && let Ok(Some(bytes)) = st.store.get_entry(self.key.as_str())
+        {
+            let cfg = st.settings();
+            if let Lookup::Hit(s) = classify(
+                Some(&bytes),
+                st.codec,
+                &cfg.config,
+                self.class,
+                Need::Geographies,
+                now,
+            ) {
+                return Ok(Arc::new(s));
+            }
+        }
         match entry.encode(st.codec) {
             Ok(envelope) => {
                 if let Err(e) = st
@@ -365,14 +382,32 @@ fn with_selected_benchmark(body: &[u8], alias: &str) -> Vec<u8> {
     }
 }
 
+/// Apply `f` to the latest catalog with compare-and-swap, so concurrent refreshes of
+/// different documents never undo each other. Returns whether `f` accepted the update.
+fn update_catalog(st: &AppState, f: impl Fn(&Catalog) -> Option<Catalog>) -> bool {
+    let mut accepted = false;
+    st.catalog.rcu(|cur| match f(cur) {
+        Some(c) => {
+            accepted = true;
+            Arc::new(c)
+        }
+        None => {
+            accepted = false;
+            Arc::clone(cur)
+        }
+    });
+    accepted
+}
+
 /// Serve a catalog document from the store when fresh, else refetch; fall back to a
-/// stale stored copy, then to the embedded snapshot.
+/// stale stored copy, then to the embedded snapshot. A fetched body is cached only
+/// if it parses as the expected document.
 async fn catalog_item(
     st: &AppState,
     store_key: &str,
     fetch: impl Future<Output = Result<UpstreamResponse, UpstreamError>>,
     snapshot: Option<Value>,
-    apply: impl FnOnce(Catalog, Value) -> Option<Catalog>,
+    apply: impl Fn(&Catalog, &Value) -> Option<Catalog>,
 ) -> Result<(Vec<u8>, &'static str), Box<Response>> {
     let ttl = st.settings().config.ttl.catalog;
     let stored = st.store.catalog_get(store_key).unwrap_or_else(|e| {
@@ -386,7 +421,10 @@ async fn catalog_item(
     }
     match fetch.await {
         Ok(r) => {
-            if let Ok(doc) = serde_json::from_slice::<Value>(&r.body) {
+            let valid = serde_json::from_slice::<Value>(&r.body)
+                .ok()
+                .is_some_and(|doc| update_catalog(st, |c| apply(c, &doc)));
+            if valid {
                 if let Err(e) = st
                     .store
                     .catalog_put(store_key.to_owned(), r.body.to_vec(), unix_now())
@@ -394,11 +432,16 @@ async fn catalog_item(
                 {
                     warn!(error = %e, "storing catalog item failed");
                 }
-                if let Some(c) = apply((**st.catalog.load()).clone(), doc) {
-                    st.catalog.store(Arc::new(c));
-                }
+                return Ok((r.body.to_vec(), "MISS"));
             }
-            Ok((r.body.to_vec(), "MISS"))
+            warn!(
+                key = store_key,
+                "upstream catalog body failed validation; not cached"
+            );
+            match stored {
+                Some((raw, _)) => Ok((raw, "STALE")),
+                None => Err(Box::new(forward(r, "MISS"))),
+            }
         }
         Err(UpstreamError::Rejected(r)) => Err(Box::new(forward(r, "MISS"))),
         Err(e) => match (stored, snapshot) {
@@ -413,7 +456,7 @@ async fn benchmarks(State(st): State<SharedState>) -> Response {
     let snapshot = Some(st.catalog.load().benchmarks_doc().clone());
     let fetch = st.upstream.fetch_benchmarks(Priority::Sync);
     match catalog_item(&st, CATALOG_BENCHMARKS, fetch, snapshot, |c, doc| {
-        c.with_benchmarks_doc(doc).ok()
+        c.clone().with_benchmarks_doc(doc.clone()).ok()
     })
     .await
     {
@@ -442,7 +485,7 @@ async fn vintages(State(st): State<SharedState>, RawQuery(query): RawQuery) -> R
     let fetch = st.upstream.fetch_vintages(Priority::Sync, &alias);
     let key = catalog_vintages_key(id);
     match catalog_item(&st, &key, fetch, snapshot, |c, doc| {
-        c.with_vintages_doc(id, doc).ok()
+        c.clone().with_vintages_doc(id, doc.clone()).ok()
     })
     .await
     {
@@ -470,16 +513,21 @@ pub async fn refresh_catalog(st: SharedState) {
         warn!("catalog refresh: benchmarks body is not JSON");
         return;
     };
-    let Some(updated) = (**st.catalog.load()).clone().with_benchmarks_doc(doc).ok() else {
+    if !update_catalog(&st, |c| c.clone().with_benchmarks_doc(doc.clone()).ok()) {
         warn!("catalog refresh: unexpected benchmarks shape");
         return;
-    };
+    }
     let _ = st
         .store
         .catalog_put(CATALOG_BENCHMARKS.into(), fetched.body.to_vec(), unix_now())
         .await;
-    let ids: Vec<u32> = updated.benchmarks().iter().map(|b| b.id).collect();
-    st.catalog.store(Arc::new(updated));
+    let ids: Vec<u32> = st
+        .catalog
+        .load()
+        .benchmarks()
+        .iter()
+        .map(|b| b.id)
+        .collect();
     for id in ids {
         match st
             .upstream
@@ -487,10 +535,12 @@ pub async fn refresh_catalog(st: SharedState) {
             .await
         {
             Ok(r) => {
-                if let Ok(doc) = serde_json::from_slice::<Value>(&r.body)
-                    && let Ok(c) = (**st.catalog.load()).clone().with_vintages_doc(id, doc)
-                {
-                    st.catalog.store(Arc::new(c));
+                let valid = serde_json::from_slice::<Value>(&r.body)
+                    .ok()
+                    .is_some_and(|doc| {
+                        update_catalog(&st, |c| c.clone().with_vintages_doc(id, doc.clone()).ok())
+                    });
+                if valid {
                     let _ = st
                         .store
                         .catalog_put(catalog_vintages_key(id), r.body.to_vec(), unix_now())
