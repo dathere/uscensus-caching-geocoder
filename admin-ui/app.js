@@ -406,6 +406,8 @@ async function loadEntries() {
     $("entries-page").textContent = `page ${entriesState.page + 1}`;
   } catch (e) {
     if (gen !== entriesState.gen) return;
+    // Retry this same query/cursor on the next visit or after a new token.
+    entriesState.loaded = false;
     $("entries-prev").disabled = entriesState.page === 0;
     report(e);
   }
