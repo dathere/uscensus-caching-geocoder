@@ -379,8 +379,8 @@ Proposed qsv design: `src/cmd/geocode/census.rs`; subcommands `qsv geocode censu
 
 | Phase | Status | Commit | Notes |
 |---|---|---|---|
-| 0 Day-1 | done | (this commit) | cargo 1.99.0; Serena already `[rust]`; fixtures recaptured 2026-10-12 and match §0.2. New facts: batch responses are `Content-Type: text/plain` with `Content-Disposition: attachment; filename=GeocodeResults.csv` (unquoted), `\n` terminator; JSONP body is `/**/cb(<json>);` with `application/javascript`; missing vintage → 400 `{"errors":["Vintage must be specified"],"status":"400"}`. TIGERweb: 80 layers, 40 non-Labels. |
-| 1 | not started | | |
+| 0 Day-1 | done | f7865ee | cargo 1.99.0; Serena already `[rust]`; fixtures recaptured 2026-10-12 and match §0.2. New facts: batch responses are `Content-Type: text/plain` with `Content-Disposition: attachment; filename=GeocodeResults.csv` (unquoted), `\n` terminator; JSONP body is `/**/cb(<json>);` with `application/javascript`; missing vintage → 400 `{"errors":["Vintage must be specified"],"status":"400"}`. TIGERweb: 80 layers, 40 non-Labels. |
+| 1 | done | (this commit) | Config is one `define_config!` table (dotted path, `UCG_*` env, default, doc) generating typed sections + `FIELDS` metadata; every layer goes through `Settings::set(path, raw, origin, source)`, so Phase 8 redb overrides are just another `Source::Override` layer. Env is an injected closure (edition-2024 `set_var` is unsafe). Flags: `--config`, `--bind`, `--db-dir`, `--log`, repeatable `--set key=value`. Durations: humantime, `0` = `Duration::ZERO` = never/off. `ucgeocoder.example.toml` is generated from `check-config --json` and a test asserts it loads to exactly the defaults. `/healthz` returns placeholders (`breaker: closed`, `db_ok: null`) until Phases 3-4. `xlsx` feature is an empty placeholder until Phase 6. `build.rs` embeds git sha only (dict assertion deferred to Phase 2). Dockerfile written but NOT built locally (no Docker here). CI validated with actionlint; `deny.toml` not run locally (cargo-deny not installed). |
 | 2 | not started | | |
 | 3 | not started | | |
 | 4 | not started | | |

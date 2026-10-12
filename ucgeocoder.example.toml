@@ -1,0 +1,124 @@
+# ucgeocoder example configuration. Every key is shown at its built-in default.
+# Precedence: defaults < this file (--config / UCG_CONFIG) < UCG_* env vars < CLI flags
+# (--set section.key=value) < runtime overrides via the admin API.
+# Durations use humantime syntax (90s, 24h, 180d); 0 means never / off.
+
+[server]
+# Listen address.  [env: UCG_BIND]
+bind = "0.0.0.0:8080"
+# Maximum request body size (batch uploads), MiB.  [env: UCG_MAX_BODY_MB]
+max_body_mb = 16
+
+[store]
+# Directory holding `<cache_name>_v3.redb`.  [env: UCG_DB_DIR]
+db_dir = "./data"
+# Cache name; file is `<cache_name>_v3.redb` (cached-compatible).  [env: UCG_CACHE_NAME]
+cache_name = "geocode-census"
+# redb page cache size, MiB.  [env: UCG_DB_CACHE_MB]
+db_cache_mb = 256
+# Writer batching window, ms.  [env: UCG_WRITER_FLUSH_MS]
+writer_flush_ms = 50
+# Maximum puts per write transaction.  [env: UCG_WRITER_MAX_BATCH]
+writer_max_batch = 500
+# Interval between durable (fsync) commits, seconds.  [env: UCG_DURABLE_COMMIT_SECS]
+durable_commit_secs = 30
+# Interval for flushing in-memory hit counters, seconds.  [env: UCG_HITCOUNT_FLUSH_SECS]
+hitcount_flush_secs = 60
+
+[upstream]
+# Census Geocoder base URL.  [env: UCG_UPSTREAM_URL]
+url = "https://geocoding.geo.census.gov/geocoder"
+# TIGERweb REST services base URL.  [env: UCG_TIGERWEB_URL]
+tigerweb_url = "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb"
+# User-Agent sent upstream.  [env: UCG_USER_AGENT]
+# user_agent = "ucgeocoder/<version> (+<repository>)"
+# Single-record request timeout, seconds.  [env: UCG_UPSTREAM_TIMEOUT_SECS]
+timeout_secs = 30
+# Batch upload timeout, seconds.  [env: UCG_UPSTREAM_BATCH_TIMEOUT_SECS]
+batch_timeout_secs = 600
+
+[cache]
+# Always fetch `geographies&layers=all` upstream and serve every view from it.  [env: UCG_FETCH_GEOGRAPHIES_ALWAYS]
+fetch_geographies_always = true
+# Serve expired entries (`X-Cache: STALE`) when upstream fails.  [env: UCG_SERVE_STALE_ON_ERROR]
+serve_stale_on_error = true
+
+[throttle]
+# Single-record requests per second.  [env: UCG_SINGLE_RPS]
+single_rps = 5
+# Single-record burst size.  [env: UCG_SINGLE_BURST]
+single_burst = 1
+# Concurrent single-record requests.  [env: UCG_SINGLE_CONCURRENCY]
+single_concurrency = 4
+# Concurrent batch uploads.  [env: UCG_BATCH_CONCURRENCY]
+batch_concurrency = 1
+# Minimum gap between batch uploads, seconds.  [env: UCG_BATCH_MIN_INTERVAL_SECS]
+batch_min_interval_secs = 2
+# Background (job) acquire poll interval, ms.  [env: UCG_BACKGROUND_POLL_MS]
+background_poll_ms = 100
+# Retries on transient upstream errors.  [env: UCG_MAX_RETRIES]
+max_retries = 3
+# Exponential backoff base, ms.  [env: UCG_RETRY_BASE_MS]
+retry_base_ms = 1000
+# Backoff / Retry-After cap, seconds.  [env: UCG_RETRY_MAX_SECS]
+retry_max_secs = 60
+# Consecutive transient failures that open the breaker.  [env: UCG_BREAKER_THRESHOLD]
+breaker_threshold = 10
+# Initial breaker open period, seconds (doubles up to 15 min).  [env: UCG_BREAKER_OPEN_SECS]
+breaker_open_secs = 60
+
+[ttl]
+# Match on a `Current`-class benchmark.  [env: UCG_TTL_MATCH_CURRENT]
+match_current = "180d"
+# Match on a `Fixed`-class benchmark (e.g. Census2020).  [env: UCG_TTL_MATCH_FIXED]
+match_fixed = 0
+# Tie.  [env: UCG_TTL_TIE]
+tie = "30d"
+# NoMatch from a single-record lookup.  [env: UCG_TTL_NOMATCH_SINGLE]
+nomatch_single = "30d"
+# NoMatch from a batch or job (also queued for retry).  [env: UCG_TTL_NOMATCH_BATCH]
+nomatch_batch = "24h"
+# Benchmarks / vintages / layers catalog.  [env: UCG_TTL_CATALOG]
+catalog = "24h"
+
+[retry]
+# Delay before a batch NoMatch is retried.  [env: UCG_NEGATIVE_RETRY_DELAY]
+negative_delay = "1h"
+# Maximum retry attempts per NoMatch entry.  [env: UCG_NEGATIVE_RETRY_ATTEMPTS]
+negative_attempts = 3
+# Interval of the automatic refresh-negatives job (`0` = off).  [env: UCG_NEGATIVE_AUTO_REFRESH]
+auto_refresh_interval = "6h"
+
+[batch]
+# Rows per upstream batch upload.  [env: UCG_BATCH_CHUNK_SIZE]
+chunk_size = 2000
+# Maximum rows accepted per request.  [env: UCG_BATCH_MAX_ROWS]
+max_rows = 10000
+# Send heuristically-matched rows upstream when the limiter is idle.  [env: UCG_BATCH_UPGRADE_WHEN_IDLE]
+upgrade_when_idle = false
+# Synthesize partial single-record JSON from batch-only entries.  [env: UCG_SERVE_PARTIAL_JSON_FROM_BATCH]
+serve_partial_json_from_batch = false
+
+[jobs]
+# Rows per job chunk.  [env: UCG_JOBS_CHUNK_SIZE]
+chunk_size = 2000
+# Attempts per chunk before its rows are marked failed.  [env: UCG_JOBS_CHUNK_MAX_ATTEMPTS]
+chunk_max_attempts = 3
+# In-flight chunk lease, seconds.  [env: UCG_JOBS_LEASE_SECS]
+lease_secs = 900
+# Re-fetch batch matches via single-record when idle to fill the JSON view.  [env: UCG_JOBS_SINGLE_RECORD_UPGRADE]
+single_record_upgrade = false
+
+[admin]
+# Bearer token for `/api/v1`, `/admin`, `/metrics`; unset = open.  [env: UCG_ADMIN_TOKEN]
+# token = "change-me"
+# Refuse to start without a token.  [env: UCG_ADMIN_REQUIRE_TOKEN]
+require_token = false
+# Serve `/metrics` without a token.  [env: UCG_METRICS_PUBLIC]
+metrics_public = false
+
+[log]
+# tracing-subscriber EnvFilter directive.  [env: UCG_LOG]
+level = "info"
+# `text` or `json`.  [env: UCG_LOG_FORMAT]
+format = "text"

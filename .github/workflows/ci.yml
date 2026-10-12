@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test (default features)
+        run: cargo test --locked
+      - name: test (xlsx)
+        run: cargo test --locked --features xlsx
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

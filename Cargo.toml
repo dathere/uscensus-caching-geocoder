@@ -1,0 +1,42 @@
+[package]
+name = "ucgeocoder"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Caching, rate-limited, wire-compatible proxy for the US Census Geocoder API"
+license = "AGPL-3.0-only"
+repository = "https://github.com/dathere/uscensus-caching-geocoder"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ucgeocoder"
+path = "src/main.rs"
+
+[features]
+default = []
+# Placeholder until Phase 6 wires calamine for xls/xlsx batch uploads.
+xlsx = []
+
+[dependencies]
+anyhow = "1.0.104"
+arc-swap = "1.9.2"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+humantime = "2.4.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
+thiserror = "2.0.21"
+tokio = { version = "1", features = ["full"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+http-body-util = "0.1.5"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
