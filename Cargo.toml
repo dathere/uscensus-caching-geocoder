@@ -27,9 +27,11 @@ axum = "0.8"
 bytes = "1.12.1"
 clap = { version = "4", features = ["derive", "env"] }
 fastrand = "2.5.0"
+form_urlencoded = "1.2.2"
 governor = "0.10"
 httpdate = "1.0.3"
 humantime = "2.4.0"
+indexmap = { version = "2.14.2", features = ["serde"] }
 redb = "4"
 reqwest = { version = "0.13", features = ["multipart", "json", "query", "gzip", "brotli", "zstd"] }
 rmp-serde = "1"
@@ -46,6 +48,7 @@ zstd = "0.14"
 [dev-dependencies]
 assert_cmd = "2.2.2"
 cached = { version = "4", default-features = false, features = ["redb_store"] }
+futures-util = "0.3.34"
 http-body-util = "0.1.5"
 predicates = "3.1.4"
 tempfile = "3.27.0"

@@ -47,6 +47,9 @@ pub struct Catalog {
     vintages: BTreeMap<u32, Vec<Vintage>>,
     default_layers: BTreeMap<String, Vec<String>>,
     tigerweb_layers: BTreeMap<String, BTreeMap<u32, String>>,
+    /// Upstream `/benchmarks` and `/vintages` bodies, served when upstream is down.
+    benchmarks_doc: Value,
+    vintages_docs: BTreeMap<u32, Value>,
 }
 
 #[derive(Deserialize)]
@@ -138,13 +141,15 @@ impl Catalog {
         tigerweb: &str,
     ) -> Result<Self, CatalogError> {
         let doc: SnapshotDoc = serde_json::from_str(snapshot)?;
-        let benchmarks = parse_benchmarks(doc.benchmarks)?;
+        let benchmarks = parse_benchmarks(doc.benchmarks.clone())?;
         let mut vintages = BTreeMap::new();
+        let mut vintages_docs = BTreeMap::new();
         for (bid, v) in doc.vintages {
             let bid: u32 = bid
                 .parse()
                 .map_err(|_| CatalogError::Field("vintages key"))?;
-            vintages.insert(bid, parse_vintages(v)?);
+            vintages.insert(bid, parse_vintages(v.clone())?);
+            vintages_docs.insert(bid, v);
         }
         let tw: BTreeMap<String, BTreeMap<String, String>> = serde_json::from_str(tigerweb)?;
         let tigerweb_layers = tw
@@ -166,19 +171,36 @@ impl Catalog {
             vintages,
             default_layers: serde_json::from_str(default_layers)?,
             tigerweb_layers,
+            benchmarks_doc: doc.benchmarks,
+            vintages_docs,
         })
     }
 
-    /// Replace benchmarks and per-benchmark vintages (e.g. after a live refresh),
-    /// keeping layer tables.
-    pub fn with_benchmarks(
+    /// Replace the benchmark list from a fresh upstream `/benchmarks` body.
+    pub fn with_benchmarks_doc(mut self, doc: Value) -> Result<Self, CatalogError> {
+        self.benchmarks = parse_benchmarks(doc.clone())?;
+        self.benchmarks_doc = doc;
+        Ok(self)
+    }
+
+    /// Replace one benchmark's vintages from a fresh upstream `/vintages` body.
+    pub fn with_vintages_doc(
         mut self,
-        benchmarks: Vec<Benchmark>,
-        vintages: BTreeMap<u32, Vec<Vintage>>,
-    ) -> Self {
-        self.benchmarks = benchmarks;
-        self.vintages = vintages;
-        self
+        benchmark_id: u32,
+        doc: Value,
+    ) -> Result<Self, CatalogError> {
+        self.vintages
+            .insert(benchmark_id, parse_vintages(doc.clone())?);
+        self.vintages_docs.insert(benchmark_id, doc);
+        Ok(self)
+    }
+
+    pub fn benchmarks_doc(&self) -> &Value {
+        &self.benchmarks_doc
+    }
+
+    pub fn vintages_doc(&self, benchmark_id: u32) -> Option<&Value> {
+        self.vintages_docs.get(&benchmark_id)
     }
 
     pub fn benchmarks(&self) -> &[Benchmark] {
@@ -361,17 +383,19 @@ mod tests {
 
     #[test]
     fn parse_live_payloads() {
-        let b = parse_benchmarks(
-            serde_json::from_str(include_str!("../tests/fixtures/live/benchmarks.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(b.len(), 4);
-        let v = parse_vintages(
-            serde_json::from_str(include_str!("../tests/fixtures/live/vintages_4.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(v.iter().any(|v| v.id == 426 && v.name == "ACS2026_Current"));
-        let c = Catalog::default().with_benchmarks(b, BTreeMap::from([(4, v)]));
+        let b: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/live/benchmarks.json")).unwrap();
+        assert_eq!(parse_benchmarks(b.clone()).unwrap().len(), 4);
+        let v: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/live/vintages_4.json")).unwrap();
+        let c = Catalog::default()
+            .with_benchmarks_doc(b.clone())
+            .unwrap()
+            .with_vintages_doc(4, v.clone())
+            .unwrap();
         assert_eq!(c.resolve_vintage(4, "426").unwrap().name, "ACS2026_Current");
+        assert_eq!(c.benchmarks_doc(), &b);
+        assert_eq!(c.vintages_doc(4), Some(&v));
+        assert!(Catalog::default().with_benchmarks_doc(Value::Null).is_err());
     }
 }

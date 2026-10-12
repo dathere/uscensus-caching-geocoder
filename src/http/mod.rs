@@ -1,5 +1,7 @@
 //! HTTP surface: router assembly and the server loop.
 
+pub mod geocoder;
+
 use std::time::Duration;
 
 use anyhow::Context;
@@ -19,6 +21,7 @@ use crate::{
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .merge(geocoder::routes())
         .with_state(state)
 }
 
@@ -64,6 +67,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     info!(path = %store.path().display(), entries = store.entry_count()?, "store opened");
     let upstream = Upstream::new(&cfg)?;
     let state = AppState::new(settings, store, upstream);
+    tokio::spawn(geocoder::refresh_catalog(state.clone()));
     let flusher = spawn_stats_flusher(
         state.store.clone(),
         state.stats.clone(),

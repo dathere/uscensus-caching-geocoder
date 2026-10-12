@@ -12,6 +12,9 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     NotFound(String),
+    /// Upstream failed after retries.
+    #[error("{0}")]
+    BadGateway(String),
     #[error("{msg}")]
     Unavailable {
         msg: String,
@@ -26,6 +29,7 @@ impl AppError {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
