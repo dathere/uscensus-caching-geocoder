@@ -16,7 +16,10 @@ use std::{
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use reqwest::{Client, RequestBuilder, StatusCode, header::CONTENT_TYPE};
+use reqwest::{
+    Client, RequestBuilder, StatusCode,
+    header::{CONTENT_TYPE, USER_AGENT},
+};
 use serde::Serialize;
 use tracing::{debug, warn};
 
@@ -61,6 +64,7 @@ pub struct ErrorRecord {
 struct Settings {
     base_url: String,
     tigerweb_url: String,
+    user_agent: String,
     timeout: Duration,
     batch_timeout: Duration,
     max_retries: u32,
@@ -73,6 +77,7 @@ impl From<&Config> for Settings {
         Self {
             base_url: c.upstream.url.trim_end_matches('/').to_owned(),
             tigerweb_url: c.upstream.tigerweb_url.trim_end_matches('/').to_owned(),
+            user_agent: c.upstream.user_agent.clone(),
             timeout: Duration::from_secs(c.upstream.timeout_secs),
             batch_timeout: Duration::from_secs(c.upstream.batch_timeout_secs),
             max_retries: c.throttle.max_retries,
@@ -98,9 +103,8 @@ fn unix_now() -> u64 {
 
 impl Upstream {
     pub fn new(cfg: &Config) -> anyhow::Result<Self> {
-        let http = Client::builder()
-            .user_agent(&cfg.upstream.user_agent)
-            .build()?;
+        // User-Agent is set per request from the live settings (see `execute`).
+        let http = Client::builder().build()?;
         Ok(Self {
             http,
             settings: ArcSwap::from_pointee(Settings::from(cfg)),
@@ -170,7 +174,10 @@ impl Upstream {
                 Kind::Single => self.throttle.acquire_single(prio).await?,
                 Kind::Batch => self.throttle.acquire_batch(prio).await?,
             };
-            let (msg, retry_after) = match build(&self.http).timeout(timeout).send().await {
+            let req = build(&self.http)
+                .timeout(timeout)
+                .header(USER_AGENT, s.user_agent.as_str());
+            let (msg, retry_after) = match req.send().await {
                 Ok(resp) if !backoff::is_retryable(resp.status()) => {
                     let status = resp.status();
                     let content_type = resp
@@ -203,11 +210,13 @@ impl Upstream {
                 ),
                 Err(e) => (e.to_string(), None),
             };
-            drop(permit);
+            // Count the failure before freeing the permit so queued callers see an
+            // opened breaker.
             self.record_error(msg.clone());
             if self.throttle.record_failure() {
                 warn!(error = %msg, "upstream circuit breaker opened");
             }
+            drop(permit);
             if attempt >= s.max_retries {
                 return Err(UpstreamError::Exhausted {
                     attempts: attempt + 1,

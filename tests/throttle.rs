@@ -213,3 +213,24 @@ async fn background_waits_for_queued_sync_requests() {
         "background started before the queued sync request"
     );
 }
+
+#[tokio::test]
+async fn user_agent_follows_runtime_config() {
+    use wiremock::matchers::header;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/benchmarks"))
+        .and(header("user-agent", "ucg-test/2"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&server)
+        .await;
+    let mut c = config(&server);
+    let up = Upstream::new(&c).unwrap();
+    assert!(
+        up.fetch_benchmarks(Priority::Sync).await.is_err(),
+        "default UA must not match"
+    );
+    c.upstream.user_agent = "ucg-test/2".into();
+    up.reconfigure(&c);
+    up.fetch_benchmarks(Priority::Sync).await.unwrap();
+}

@@ -143,6 +143,10 @@ impl Throttle {
         let mut b = lock(&self.breaker);
         b.threshold = cfg.breaker_threshold.max(1);
         b.base_open = Duration::from_secs(cfg.breaker_open_secs);
+        // Outside an open/escalating cycle the next opening uses the new base period.
+        if b.open_until.is_none() {
+            b.open_for = b.base_open;
+        }
     }
 
     /// Permit for one single-record request; hold it for the request's duration.
@@ -159,11 +163,12 @@ impl Throttle {
                     .await
                     .expect("throttle semaphores are never closed");
                 self.limiter.load_full().until_ready().await;
+                // The breaker may have opened while this caller was queued.
+                self.check_breaker()?;
                 Ok(permit)
             }
             Priority::Background => loop {
-                if let Some(wait) = self.breaker_remaining() {
-                    tokio::time::sleep(wait).await;
+                if self.wait_out_breaker().await {
                     continue;
                 }
                 if self.sync_waiters.load(Ordering::SeqCst) == 0
@@ -194,12 +199,13 @@ impl Throttle {
                 if let Some(prev) = *last {
                     tokio::time::sleep_until((prev + gap).into()).await;
                 }
+                // The breaker may have opened while this caller was queued.
+                self.check_breaker()?;
                 *last = Some(Instant::now());
                 Ok(permit)
             }
             Priority::Background => loop {
-                if let Some(wait) = self.breaker_remaining() {
-                    tokio::time::sleep(wait).await;
+                if self.wait_out_breaker().await {
                     continue;
                 }
                 if self.batch_sync_waiters.load(Ordering::SeqCst) == 0
@@ -216,6 +222,18 @@ impl Throttle {
                 }
                 tokio::time::sleep(self.poll()).await;
             },
+        }
+    }
+
+    /// If the breaker is open, sleep one poll interval (so resets are noticed promptly)
+    /// and return `true`; otherwise return `false` immediately.
+    async fn wait_out_breaker(&self) -> bool {
+        match self.breaker_remaining() {
+            Some(remaining) => {
+                tokio::time::sleep(remaining.min(self.poll())).await;
+                true
+            }
+            None => false,
         }
     }
 
@@ -298,17 +316,36 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn resize(sem: &Semaphore, size: &AtomicUsize, target: usize) {
+fn resize(sem: &Arc<Semaphore>, size: &AtomicUsize, target: usize) {
     let target = target.max(1);
-    let cur = size.load(Ordering::SeqCst);
+    let cur = size.swap(target, Ordering::SeqCst);
     if target > cur {
         sem.add_permits(target - cur);
-        size.store(target, Ordering::SeqCst);
     } else if target < cur {
-        // Only idle permits can be forgotten; busy ones shrink the pool as they return
-        // on the next reconfigure.
-        let forgotten = sem.forget_permits(cur - target);
-        size.store(cur - forgotten, Ordering::SeqCst);
+        let excess = cur - target;
+        let forgotten = sem.forget_permits(excess);
+        let still_held = excess - forgotten;
+        if still_held > 0 {
+            // Those permits are in use: retire them as they come back.
+            let sem = Arc::clone(sem);
+            let retire = async move {
+                if let Ok(p) = sem
+                    .acquire_many_owned(u32::try_from(still_held).unwrap_or(u32::MAX))
+                    .await
+                {
+                    p.forget();
+                }
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn(retire);
+                }
+                Err(_) => tracing::warn!(
+                    still_held,
+                    "concurrency shrink deferred: no runtime to retire busy permits"
+                ),
+            }
+        }
     }
 }
 
@@ -438,5 +475,81 @@ mod tests {
         c.single_concurrency = 2;
         t.reconfigure(&c);
         assert_eq!(t.available_permits().0, 2);
+    }
+
+    fn open_breaker(t: &Throttle) {
+        while !t.record_failure() {}
+    }
+
+    #[tokio::test]
+    async fn queued_sync_caller_sees_breaker_that_opened_while_waiting() {
+        let mut c = cfg();
+        c.breaker_threshold = 2;
+        let t = Arc::new(Throttle::new(&c));
+        let held = t.acquire_single(Priority::Sync).await.unwrap();
+        let held_batch = t.acquire_batch(Priority::Sync).await.unwrap();
+        let (t1, t2) = (Arc::clone(&t), Arc::clone(&t));
+        let single = tokio::spawn(async move { t1.acquire_single(Priority::Sync).await.map(drop) });
+        let batch = tokio::spawn(async move { t2.acquire_batch(Priority::Sync).await.map(drop) });
+        while t.sync_waiters() != (1, 1) {
+            tokio::task::yield_now().await;
+        }
+        open_breaker(&t);
+        drop(held);
+        drop(held_batch);
+        assert!(single.await.unwrap().is_err());
+        assert!(batch.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn shrinking_while_permits_are_busy_takes_effect_when_they_return() {
+        let mut c = cfg();
+        c.single_concurrency = 4;
+        let t = Throttle::new(&c);
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(t.acquire_single(Priority::Sync).await.unwrap());
+        }
+        c.single_concurrency = 1;
+        t.reconfigure(&c);
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(t.available_permits().0, 1);
+        // Growing again afterwards is still exact.
+        c.single_concurrency = 3;
+        t.reconfigure(&c);
+        assert_eq!(t.available_permits().0, 3);
+    }
+
+    #[tokio::test]
+    async fn background_waiter_notices_breaker_reset() {
+        let mut c = cfg();
+        c.breaker_threshold = 1;
+        c.breaker_open_secs = 900;
+        let t = Arc::new(Throttle::new(&c));
+        open_breaker(&t);
+        let t1 = Arc::clone(&t);
+        let bg =
+            tokio::spawn(async move { t1.acquire_single(Priority::Background).await.map(drop) });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!bg.is_finished());
+        t.reset_breaker();
+        tokio::time::timeout(Duration::from_secs(1), bg)
+            .await
+            .expect("background acquire stalled after reset")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn reconfigured_open_period_applies_to_next_opening() {
+        let mut c = cfg();
+        c.breaker_threshold = 1;
+        c.breaker_open_secs = 60;
+        let t = Throttle::new(&c);
+        c.breaker_open_secs = 1;
+        t.reconfigure(&c);
+        assert!(t.record_failure());
+        assert!(t.breaker_state().retry_after_secs <= 1);
     }
 }
