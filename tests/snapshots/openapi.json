@@ -743,7 +743,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "Refetch benchmarks and vintages from upstream (background priority).",
+        "summary": "Refetch benchmarks and vintages from upstream (background priority). 502 if any\npart failed (the previous catalog stays in effect for it).",
         "operationId": "refresh",
         "responses": {
           "200": {
@@ -754,6 +754,9 @@
                 }
               }
             }
+          },
+          "502": {
+            "description": "Upstream refresh failed (partly or entirely)"
           }
         }
       }

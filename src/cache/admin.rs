@@ -299,10 +299,12 @@ pub async fn store_imported(st: &AppState, records: Vec<Imported>) -> Result<(),
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
         + st.settings().config.retry.negative_delay.as_secs();
-    let mut items = records;
-    while !items.is_empty() {
-        let rest = items.split_off(items.len().min(IMPORT_BATCH));
-        let batch = std::mem::replace(&mut items, rest);
+    let mut items = records.into_iter();
+    loop {
+        let batch: Vec<Imported> = items.by_ref().take(IMPORT_BATCH).collect();
+        if batch.is_empty() {
+            break;
+        }
         let retries = batch
             .iter()
             .filter(|i| i.needs_retry)

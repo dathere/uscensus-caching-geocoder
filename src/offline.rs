@@ -26,6 +26,24 @@ use crate::{
     upstream::Upstream,
 };
 
+/// `a` exists and is the same file as `b` (same device and inode on Unix, so hard and
+/// symbolic links are caught; the same canonical path elsewhere).
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ma.dev() == mb.dev() && ma.ino() == mb.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (ma, mb);
+        matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    }
+}
+
 /// Open the store and build the app state (no server, no job runner).
 fn open(settings: Settings) -> anyhow::Result<SharedState> {
     let store = Store::open(&StoreOptions::from(&settings.config.store))?;
@@ -103,6 +121,12 @@ pub fn purge_cmd(
 /// Export to `output` (`-` = stdout).
 pub fn export(settings: Settings, prefix: &str, output: &Path) -> anyhow::Result<()> {
     with_state(settings, async |st| {
+        if output != Path::new("-") && is_same_file(output, st.store.path()) {
+            bail!(
+                "refusing to export into the database file {}",
+                st.store.path().display()
+            );
+        }
         let mut out: Box<dyn Write + Send> = if output == Path::new("-") {
             Box::new(std::io::BufWriter::new(std::io::stdout()))
         } else {
@@ -141,10 +165,22 @@ pub struct CsvImport {
 /// Restore JSON lines (whole file in memory; no body limit here), or create a `warm`
 /// job from a CSV that the server runs when it next starts.
 pub fn import(settings: Settings, file: &PathBuf, csv: Option<CsvImport>) -> anyhow::Result<()> {
-    let data = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    with_state(settings, async |st| match &csv {
+    // The store is opened (and its lock taken) before the possibly large file is read.
+    with_state(settings, async |st| {
+        let data = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        import_data(st, file, &data, csv.as_ref()).await
+    })
+}
+
+async fn import_data(
+    st: &SharedState,
+    file: &Path,
+    data: &[u8],
+    csv: Option<&CsvImport>,
+) -> anyhow::Result<()> {
+    match csv {
         None => {
-            let parsed = parse_import(&data, st.codec, 20);
+            let parsed = parse_import(data, st.codec, 20);
             let records = parsed.records.len();
             store_imported(st, parsed.records).await?;
             eprintln!("restored {records} entries");
@@ -167,7 +203,7 @@ pub fn import(settings: Settings, file: &PathBuf, csv: Option<CsvImport>) -> any
             )
             .map_err(anyhow::Error::msg)?;
             let name = file.file_name().map(|n| n.to_string_lossy().into_owned());
-            let inputs = submit::inputs_from_file(&data, name.as_deref(), &c.searchtype)
+            let inputs = submit::inputs_from_file(data, name.as_deref(), &c.searchtype)
                 .map_err(anyhow::Error::msg)?;
             let spec = JobSpec {
                 kind: JobKind::Warm,
@@ -186,7 +222,7 @@ pub fn import(settings: Settings, file: &PathBuf, csv: Option<CsvImport>) -> any
             );
             Ok(())
         }
-    })
+    }
 }
 
 pub fn compact_cmd(settings: Settings) -> anyhow::Result<()> {
@@ -211,7 +247,10 @@ pub fn compact_cmd(settings: Settings) -> anyhow::Result<()> {
 pub fn catalog(settings: Settings, refresh: bool, json: bool) -> anyhow::Result<()> {
     with_state(settings, async |st| {
         if refresh {
-            refresh_catalog(st.clone()).await;
+            let failures = refresh_catalog(st.clone()).await;
+            if !failures.is_empty() {
+                bail!("catalog refresh failed: {}", failures.join("; "));
+            }
         }
         let view = catalog_view(st);
         if json {

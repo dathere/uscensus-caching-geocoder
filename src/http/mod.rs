@@ -116,6 +116,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     info!(path = %store.path().display(), entries = store.entry_count()?, "store opened");
     let upstream = Upstream::new(&cfg)?;
     let state = AppState::new(settings, store, upstream);
+    // Failures are logged; the cached/snapshot catalog stays in effect.
     tokio::spawn(geocoder::refresh_catalog(state.clone()));
     let flusher = spawn_stats_flusher(
         state.store.clone(),

@@ -614,3 +614,17 @@ async fn metrics_catalog_and_upstream() {
     assert_eq!(status, 200);
     assert_eq!(json(&body)["breaker"]["open"], false);
 }
+
+#[tokio::test]
+async fn catalog_refresh_failure_is_a_502() {
+    // The mock upstream has no /benchmarks route (404).
+    let h = admin(|_| {}).await;
+    let (status, _, body) = send(&h, "POST", "/api/v1/catalog/refresh", None).await;
+    assert_eq!(status, 502, "{}", String::from_utf8_lossy(&body));
+    assert!(
+        json(&body)["errors"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("Catalog refresh failed: benchmarks")
+    );
+}

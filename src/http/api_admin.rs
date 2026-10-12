@@ -95,11 +95,25 @@ async fn get_catalog(State(st): State<SharedState>) -> Json<CatalogView> {
     Json(catalog_view(&st))
 }
 
-/// Refetch benchmarks and vintages from upstream (background priority).
-#[utoipa::path(post, path = "/api/v1/catalog/refresh", tag = TAG, responses((status = 200, body = CatalogView)))]
-async fn refresh(State(st): State<SharedState>) -> Json<CatalogView> {
-    refresh_catalog(st.clone()).await;
-    Json(catalog_view(&st))
+/// Refetch benchmarks and vintages from upstream (background priority). 502 if any
+/// part failed (the previous catalog stays in effect for it).
+#[utoipa::path(
+    post,
+    path = "/api/v1/catalog/refresh",
+    tag = TAG,
+    responses(
+        (status = 200, body = CatalogView),
+        (status = 502, description = "Upstream refresh failed (partly or entirely)")
+    )
+)]
+async fn refresh(State(st): State<SharedState>) -> Response {
+    let failures = refresh_catalog(st.clone()).await;
+    if failures.is_empty() {
+        Json(catalog_view(&st)).into_response()
+    } else {
+        AppError::BadGateway(format!("Catalog refresh failed: {}", failures.join("; ")))
+            .into_response()
+    }
 }
 
 // ------------------------------------------------------------------- config

@@ -501,26 +501,35 @@ async fn vintages(State(st): State<SharedState>, RawQuery(query): RawQuery) -> R
 
 /// Refresh benchmarks and every benchmark's vintages at background priority, seeding
 /// the store. Run once at startup so alias resolution reflects Census's current list.
-pub async fn refresh_catalog(st: SharedState) {
+/// Returns what failed (empty: everything refreshed); failures are also logged and the
+/// cached or snapshot catalog stays in effect for them.
+pub async fn refresh_catalog(st: SharedState) -> Vec<String> {
+    let mut failures = Vec::new();
     let fetched = match st.upstream.fetch_benchmarks(Priority::Background).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "catalog refresh: benchmarks unavailable; using cached/snapshot catalog");
-            return;
+            failures.push(format!("benchmarks: {e}"));
+            return failures;
         }
     };
     let Ok(doc) = serde_json::from_slice::<Value>(&fetched.body) else {
         warn!("catalog refresh: benchmarks body is not JSON");
-        return;
+        failures.push("benchmarks: body is not JSON".into());
+        return failures;
     };
     if !update_catalog(&st, |c| c.clone().with_benchmarks_doc(doc.clone()).ok()) {
         warn!("catalog refresh: unexpected benchmarks shape");
-        return;
+        failures.push("benchmarks: unexpected shape".into());
+        return failures;
     }
-    let _ = st
+    if let Err(e) = st
         .store
         .catalog_put(CATALOG_BENCHMARKS.into(), fetched.body.to_vec(), unix_now())
-        .await;
+        .await
+    {
+        failures.push(format!("benchmarks: storing failed: {e}"));
+    }
     let ids: Vec<u32> = st
         .catalog
         .load()
@@ -540,17 +549,25 @@ pub async fn refresh_catalog(st: SharedState) {
                     .is_some_and(|doc| {
                         update_catalog(&st, |c| c.clone().with_vintages_doc(id, doc.clone()).ok())
                     });
-                if valid {
-                    let _ = st
-                        .store
-                        .catalog_put(catalog_vintages_key(id), r.body.to_vec(), unix_now())
-                        .await;
+                if !valid {
+                    warn!(benchmark = id, "catalog refresh: unexpected vintages body");
+                    failures.push(format!("vintages of benchmark {id}: unexpected body"));
+                } else if let Err(e) = st
+                    .store
+                    .catalog_put(catalog_vintages_key(id), r.body.to_vec(), unix_now())
+                    .await
+                {
+                    failures.push(format!("vintages of benchmark {id}: storing failed: {e}"));
                 }
             }
-            Err(e) => warn!(error = %e, benchmark = id, "catalog refresh: vintages unavailable"),
+            Err(e) => {
+                warn!(error = %e, benchmark = id, "catalog refresh: vintages unavailable");
+                failures.push(format!("vintages of benchmark {id}: {e}"));
+            }
         }
     }
-    debug!("catalog refreshed");
+    debug!(failures = failures.len(), "catalog refreshed");
+    failures
 }
 
 #[cfg(test)]

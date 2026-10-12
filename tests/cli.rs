@@ -101,10 +101,12 @@ fn stats_json(dir: &Path) -> serde_json::Value {
 fn fails_fast_while_the_store_is_locked() {
     let dir = tempfile::tempdir().unwrap();
     let _held = open(dir.path());
+    // `import` takes the lock before reading its (here missing) file.
     for args in [
         vec!["stats"],
         vec!["purge", "--scope", "all"],
         vec!["compact"],
+        vec!["import", "missing.jsonl"],
     ] {
         cmd(dir.path())
             .args(&args)
@@ -193,6 +195,16 @@ async fn stats_purge_export_import_compact() {
         .failure()
         .stderr(contains("line 3").and(contains("1 invalid record")));
 
+    // Exporting onto the database file itself is refused (it would truncate it).
+    let db = d.join("geocode-census_v3.redb");
+    cmd(d)
+        .args(["export", "-o"])
+        .arg(&db)
+        .assert()
+        .failure()
+        .stderr(contains("refusing to export into the database file"));
+    assert_eq!(stats_json(d)["entries"], 2);
+
     cmd(d)
         .arg("compact")
         .assert()
@@ -256,4 +268,21 @@ fn catalog_show() {
         .assert()
         .success()
         .stdout(contains("Current_Current"));
+}
+
+#[test]
+fn catalog_refresh_reports_upstream_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd(dir.path())
+        .args([
+            "--set",
+            "upstream.url=http://127.0.0.1:9",
+            "--set",
+            "throttle.max_retries=0",
+        ])
+        .args(["catalog", "refresh"])
+        .timeout(Duration::from_secs(60))
+        .assert()
+        .failure()
+        .stderr(contains("catalog refresh failed"));
 }
