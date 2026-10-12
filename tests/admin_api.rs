@@ -235,6 +235,12 @@ async fn every_purge_scope_with_dry_run() {
             json!({"scope": "prefix", "value": "v1|address|"}),
             &[0, 1, 3, 5],
         ),
+        // Prefixes are exact: the trailing space is part of it (trimmed, it would
+        // select `v1|address|4|4|B;;;`).
+        (
+            json!({"scope": "prefix", "value": "v1|address|4|4|B;;; "}),
+            &[],
+        ),
     ];
     let all: Vec<&str> = seed_entries().iter().map(|e| e.0).collect();
     for (req, expected) in cases {
@@ -320,6 +326,11 @@ async fn export_import_round_trip() {
         (json!(6), json!(1))
     );
     assert_eq!(resp["errors"][0]["line"], 7);
+
+    // The restored batch No_Match comes with its pending re-check.
+    let due = dst.state.store.retry_due(u64::MAX, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].key, "v1|address|4|4|B;;;");
 
     for (k, _, _, _) in seed_entries() {
         let a = decode(

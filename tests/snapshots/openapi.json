@@ -1270,11 +1270,7 @@
             ],
             "properties": {
               "json": {
-                "type": [
-                  "object",
-                  "null"
-                ],
-                "description": "The stored upstream JSON (`addressMatches` or `geographies`), verbatim."
+                "description": "The stored upstream JSON, verbatim: the `addressMatches` array (address\nsearches) or the `geographies` object (coordinates)."
               },
               "batch": {
                 "oneOf": [

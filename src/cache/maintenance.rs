@@ -26,7 +26,7 @@ use super::{
         decode_stored, encode_stored,
     },
     key::{CacheKey, KEY_VERSION, SearchType},
-    policy::{BenchmarkClass, Freshness, freshness, ttl},
+    policy::{BenchmarkClass, Freshness, freshness, needs_negative_retry, ttl},
 };
 use crate::{
     config::TtlConfig,
@@ -193,16 +193,57 @@ pub fn export_record(key: &str, bytes: &[u8], codec: &Codec) -> Result<ExportRec
     })
 }
 
-/// The key and stored bytes for an imported record (re-encoded with `codec`).
-pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<(String, Vec<u8>), RecordError> {
+/// An import record ready to store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    pub key: String,
+    pub stored: Vec<u8>,
+    /// A batch/job NoMatch: its re-check must be queued with it.
+    pub needs_retry: bool,
+}
+
+/// Validate a record and re-encode it with `codec`. The payload must agree with the
+/// advertised views (and a Match must carry a non-empty answer), so an imported entry
+/// can never serve an empty answer as a cache hit.
+pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<Imported, RecordError> {
+    let invalid = |m: String| Err(RecordError::Invalid(m));
     CacheKey::parse(&rec.key).map_err(|e| RecordError::Invalid(e.to_string()))?;
-    if rec.views > 0x07 {
-        return Err(RecordError::Invalid(format!("invalid views {}", rec.views)));
+    if rec.views == 0 || rec.views > 0x07 {
+        return invalid(format!("invalid views {}", rec.views));
     }
+    let views = Views::from_bits(rec.views);
+    let wants_json = views.contains(Views::JSON) || views.contains(Views::GEO);
+    if wants_json != rec.json.is_some() {
+        return invalid("`json` must be present exactly when views include json or geo".into());
+    }
+    if views.contains(Views::BATCH) != rec.batch.is_some() {
+        return invalid("`batch` must be present exactly when views include batch".into());
+    }
+    if rec.status == Status::Match
+        && let Some(j) = &rec.json
+    {
+        let empty = match serde_json::from_str::<serde_json::Value>(j.get()) {
+            Ok(serde_json::Value::Array(a)) => a.is_empty(),
+            Ok(serde_json::Value::Object(o)) => o.is_empty(),
+            _ => true,
+        };
+        if empty {
+            return invalid("a Match needs a non-empty `json` array or object".into());
+        }
+    }
+    if rec.created_at_nanos >= 1_000_000_000 {
+        return invalid("`created_at_nanos` must be below 1e9".into());
+    }
+    let Some(created_at) =
+        UNIX_EPOCH.checked_add(Duration::new(rec.created_at, rec.created_at_nanos))
+    else {
+        return invalid("`created_at` is out of range".into());
+    };
+    let needs_retry = needs_negative_retry(rec.status, rec.source);
     let entry = Entry {
         status: rec.status,
         source: rec.source,
-        views: Views::from_bits(rec.views),
+        views,
         verified_at: rec.verified_at,
         payload: EntryPayload {
             json: rec.json.map(|j| ByteBuf::from(j.get().as_bytes().to_vec())),
@@ -211,9 +252,63 @@ pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<(String, Vec<u8
             vintage_name: rec.vintage_name,
         },
     };
-    let created_at =
-        UNIX_EPOCH + Duration::new(rec.created_at, rec.created_at_nanos.min(999_999_999));
-    Ok((rec.key, encode_stored(&entry.encode(codec)?, created_at)))
+    Ok(Imported {
+        key: rec.key,
+        stored: encode_stored(&entry.encode(codec)?, created_at),
+        needs_retry,
+    })
+}
+
+/// The result of parsing an import body.
+#[derive(Debug, Default)]
+pub struct ParsedImport {
+    pub records: Vec<Imported>,
+    pub invalid: u64,
+    /// `(1-based line, error)` of the first `max_errors` invalid records.
+    pub errors: Vec<(usize, String)>,
+}
+
+/// Parse concatenated `ExportRecord` JSON values (normally one per line; a record may
+/// span lines). After an invalid record, parsing resumes at the next line.
+pub fn parse_import(body: &[u8], codec: &Codec, max_errors: usize) -> ParsedImport {
+    let mut out = ParsedImport::default();
+    let (mut pos, mut line, mut counted) = (0usize, 1usize, 0usize);
+    loop {
+        while pos < body.len() && body[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= body.len() {
+            break;
+        }
+        line += body[counted..pos].iter().filter(|b| **b == b'\n').count();
+        counted = pos;
+        let mut stream =
+            serde_json::Deserializer::from_slice(&body[pos..]).into_iter::<ExportRecord>();
+        let parsed = match stream.next() {
+            Some(Ok(rec)) => {
+                pos += stream.byte_offset();
+                import_record(rec, codec).map_err(|e| e.to_string())
+            }
+            Some(Err(e)) => {
+                pos = body[pos..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(body.len(), |i| pos + i + 1);
+                Err(e.to_string())
+            }
+            None => break,
+        };
+        match parsed {
+            Ok(item) => out.records.push(item),
+            Err(error) => {
+                out.invalid += 1;
+                if out.errors.len() < max_errors {
+                    out.errors.push((line, error));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Keep `existing` when it is newer than the imported entry (an import never rolls an
@@ -313,8 +408,10 @@ mod tests {
         let line = serde_json::to_string(&rec).unwrap();
         assert!(line.contains(json), "{line}");
         let back: ExportRecord = serde_json::from_str(&line).unwrap();
-        let (k, restored) = import_record(back, Codec::embedded()).unwrap();
-        assert_eq!(k, key(4, 4));
+        let imported = import_record(back, Codec::embedded()).unwrap();
+        assert_eq!(imported.key, key(4, 4));
+        assert!(!imported.needs_retry);
+        let restored = imported.stored;
         let (env_a, at_a) = decode_stored(&bytes).unwrap();
         let (env_b, at_b) = decode_stored(&restored).unwrap();
         assert_eq!(at_a, at_b);
@@ -331,5 +428,53 @@ mod tests {
             json,
         );
         assert!(import_keeps_existing(&bytes, &older));
+    }
+
+    fn record(json: Option<&str>, status: Status, views: u8, created_at: u64) -> String {
+        let json = json.map_or("null".to_owned(), str::to_owned);
+        format!(
+            r#"{{"key":"{}","created_at":{created_at},"verified_at":1,"status":"{}","source":"Single","views":{views},"json":{json},"batch":null,"benchmark_name":"b","vintage_name":"v"}}"#,
+            key(4, 4),
+            match status {
+                Status::Match => "Match",
+                Status::NoMatch => "NoMatch",
+                Status::Tie => "Tie",
+            }
+        )
+    }
+
+    #[test]
+    fn import_validation_and_resync() {
+        let c = Codec::embedded();
+        let pretty = "[\n  {\"x\": 1}\n]";
+        let body = [
+            record(Some(pretty), Status::Match, 1, 5),
+            record(None, Status::Match, 1, 5), // JSON view without json
+            record(Some("[]"), Status::Match, 1, 5), // empty Match
+            record(Some("[1]"), Status::Match, 1, u64::MAX), // out of range
+            "{not json}".to_owned(),
+            record(Some("[]"), Status::NoMatch, 1, 5),
+        ]
+        .join("\n");
+        let p = parse_import(body.as_bytes(), c, 10);
+        assert_eq!(p.records.len(), 2, "{:?}", p.errors);
+        assert_eq!(p.invalid, 4);
+        assert_eq!(
+            p.errors.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+            [4, 5, 6, 7]
+        );
+        // A record spanning lines keeps its bytes exactly.
+        let s = decode_stored(&p.records[0].stored).unwrap();
+        let e = Entry::decode(&s.0, c).unwrap();
+        assert_eq!(e.payload.json.unwrap().as_slice(), pretty.as_bytes());
+
+        let mut nm =
+            serde_json::from_str::<ExportRecord>(&record(Some("[]"), Status::NoMatch, 1, 5))
+                .unwrap();
+        nm.source = EntrySource::Batch;
+        nm.views = 4;
+        nm.json = None;
+        nm.batch = Some(BatchView::default());
+        assert!(import_record(nm, c).unwrap().needs_retry);
     }
 }

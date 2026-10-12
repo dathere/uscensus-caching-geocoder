@@ -4,7 +4,6 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    convert::Infallible,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -30,8 +29,7 @@ use crate::{
         envelope::{BatchView, EntrySource, HEADER_LEN, Header, Status, Views, decode_stored},
         key::{CacheKey, KEY_VERSION, SearchType},
         maintenance::{
-            ExportRecord, PurgeCtx, PurgeScope, export_record, import_keeps_existing,
-            import_record, purge,
+            PurgeCtx, PurgeScope, export_record, import_keeps_existing, parse_import, purge,
         },
         policy::{Freshness, freshness, ttl},
         views::decode,
@@ -427,8 +425,9 @@ async fn list_entries(State(st): State<SharedState>, Query(q): Query<EntriesQuer
 pub struct EntryDetail {
     #[serde(flatten)]
     pub summary: EntrySummary,
-    /// The stored upstream JSON (`addressMatches` or `geographies`), verbatim.
-    #[schema(value_type = Option<Object>)]
+    /// The stored upstream JSON, verbatim: the `addressMatches` array (address
+    /// searches) or the `geographies` object (coordinates).
+    #[schema(value_type = Option<Value>)]
     pub json: Option<Box<RawValue>>,
     pub batch: Option<BatchView>,
     pub benchmark_name: String,
@@ -508,11 +507,16 @@ pub struct PurgeResponse {
 }
 
 fn purge_scope(st: &SharedState, req: &PurgeRequest) -> Result<PurgeScope, String> {
-    let value = req
-        .value
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
+    // A prefix is matched exactly (trailing spaces are part of it); other values are
+    // identifiers.
+    let value = if req.scope == "prefix" {
+        req.value.as_deref().filter(|v| !v.is_empty())
+    } else {
+        req.value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
     let need = || value.ok_or_else(|| format!("scope `{}` needs a value", req.scope));
     let catalog = st.catalog.load();
     let bench = |b: &str| {
@@ -593,7 +597,7 @@ const EXPORT_PAGE: usize = 500;
 )]
 async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> Response {
     let prefix = q.prefix.unwrap_or_default();
-    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
     let (store, codec) = (st.store.clone(), st.codec);
     // Short read transactions, one page each, so a long export never blocks compaction.
     tokio::task::spawn_blocking(move || {
@@ -603,6 +607,8 @@ async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> 
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "export aborted");
+                    // Fail the body so the client sees a truncated download.
+                    let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
                     return;
                 }
             };
@@ -617,7 +623,7 @@ async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> 
                     Err(e) => warn!(key = %k, error = %e, "export: skipping undecodable entry"),
                 }
             }
-            if !chunk.is_empty() && tx.blocking_send(Bytes::from(chunk)).is_err() {
+            if !chunk.is_empty() && tx.blocking_send(Ok(Bytes::from(chunk))).is_err() {
                 return; // client went away
             }
             match page.last() {
@@ -627,7 +633,7 @@ async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> 
         }
     });
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|b| (Ok::<_, Infallible>(b), rx))
+        rx.recv().await.map(|item| (item, rx))
     });
     let mut resp = Body::from_stream(stream).into_response();
     let h = resp.headers_mut();
@@ -707,39 +713,33 @@ const IMPORT_BATCH: usize = 1000;
 
 async fn import_jsonl(st: SharedState, body: Bytes) -> Response {
     let codec = st.codec;
-    let parsed = tokio::task::spawn_blocking(move || {
-        let mut items = Vec::new();
-        let mut errors = Vec::new();
-        let mut invalid = 0u64;
-        for (n, line) in (1usize..).zip(body.split(|b| *b == b'\n')) {
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            let rec = serde_json::from_slice::<ExportRecord>(line)
-                .map_err(|e| e.to_string())
-                .and_then(|r| import_record(r, codec).map_err(|e| e.to_string()));
-            match rec {
-                Ok(item) => items.push(item),
-                Err(error) => {
-                    invalid += 1;
-                    if errors.len() < 50 {
-                        errors.push(ImportError { line: n, error });
-                    }
-                }
-            }
-        }
-        (items, invalid, errors)
-    })
-    .await;
-    let (items, invalid, errors) = match parsed {
-        Ok(x) => x,
+    let parsed = tokio::task::spawn_blocking(move || parse_import(&body, codec, 50)).await;
+    let parsed = match parsed {
+        Ok(p) => p,
         Err(e) => return internal(anyhow::anyhow!("import task: {e}")),
     };
+    let (invalid, errors) = (
+        parsed.invalid,
+        parsed
+            .errors
+            .into_iter()
+            .map(|(line, error)| ImportError { line, error })
+            .collect(),
+    );
+    let items = parsed.records;
     let records = items.len() as u64;
+    let due = unix(SystemTime::now()) + st.settings().config.retry.negative_delay.as_secs();
     let mut items = items;
     while !items.is_empty() {
         let rest = items.split_off(items.len().min(IMPORT_BATCH));
         let batch = std::mem::replace(&mut items, rest);
+        // Restored batch/job NoMatch entries keep their pending re-check.
+        let retries = batch
+            .iter()
+            .filter(|i| i.needs_retry)
+            .map(|i| (i.key.clone(), due, 0))
+            .collect();
+        let batch = batch.into_iter().map(|i| (i.key, i.stored)).collect();
         let written = st
             .store
             .put_entries_with(
@@ -751,7 +751,7 @@ async fn import_jsonl(st: SharedState, body: Bytes) -> Response {
                         Some(new.clone())
                     }
                 },
-                Vec::new(),
+                retries,
             )
             .await;
         if let Err(e) = written {

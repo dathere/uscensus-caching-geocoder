@@ -296,6 +296,10 @@ pub async fn scheduler(st: SharedState) {
             continue;
         }
         tokio::time::sleep(every).await;
+        // It may have been switched off (runtime override) while we slept.
+        if st.settings().config.retry.auto_refresh_interval.is_zero() {
+            continue;
+        }
         match auto_refresh(&st).await {
             Ok(0) => {}
             Ok(n) => info!(jobs = n, "scheduled refresh-negatives"),
