@@ -74,9 +74,13 @@ golden tests against responses captured from census.gov (`tests/fixtures/live/`)
   expected width are ignored.
 - **Not mirrored on purpose.** A missing file gets a JSON 400 (Census serves its HTML form
   there). Broken CSV quoting gets a 400 naming the rows (Census answers 500).
-- **Single-record errors.** Requests the proxy cannot key (unknown benchmark/vintage,
-  missing fields, `format` other than `json`/`jsonp`) are passed through to Census uncached
-  and answered verbatim with `X-Cache: BYPASS`.
+- **Single-record errors.**
+  - A missing `benchmark`, a missing `vintage` on a geographies request, and an invalid
+    JSONP `callback` are answered locally, without contacting Census. The text is Census's
+    own, and no `X-Cache` header is sent.
+  - Other requests the proxy cannot key (unknown benchmark/vintage, missing address fields,
+    `format` other than `json`/`jsonp`) are passed through to Census uncached and answered
+    verbatim with `X-Cache: BYPASS`.
 
 ### Response headers
 
@@ -231,7 +235,9 @@ Precedence, lowest to highest: built-in defaults, a TOML file (`--config` or `UC
 `UCG_*` environment variables, command-line flags (`--bind`, `--db-dir`, `--log`, and
 `--set key=value` for any key), then runtime overrides from the admin API.
 
-- `ucgeocoder check-config` prints the effective value and source of every key.
+- `ucgeocoder check-config` prints the value and source of every key from defaults, TOML,
+  environment and flags. It does not include runtime overrides stored by the admin API;
+  `GET /api/v1/config` shows a running server's effective settings, overrides included.
 - `ucgeocoder.example.toml` lists them all with their defaults.
 - Durations use humantime (`90s`, `24h`, `180d`); `0` means never/off.
 
@@ -276,11 +282,11 @@ Precedence, lowest to highest: built-in defaults, a TOML file (`--config` or `UC
 | `batch.chunk_size` | `UCG_BATCH_CHUNK_SIZE` | `2000` | Rows per upstream batch upload. |
 | `batch.max_rows` | `UCG_BATCH_MAX_ROWS` | `10000` | Maximum rows accepted per request. |
 | `batch.upgrade_when_idle` | `UCG_BATCH_UPGRADE_WHEN_IDLE` | `false` | Send heuristically-matched rows upstream when the limiter is idle. |
-| `batch.serve_partial_json_from_batch` | `UCG_SERVE_PARTIAL_JSON_FROM_BATCH` | `false` | Synthesize partial single-record JSON from batch-only entries. |
+| `batch.serve_partial_json_from_batch` | `UCG_SERVE_PARTIAL_JSON_FROM_BATCH` | `false` | Synthesize partial single-record JSON from batch-only entries. **Reserved: not implemented yet; has no effect.** |
 | `jobs.chunk_size` | `UCG_JOBS_CHUNK_SIZE` | `2000` | Rows per job chunk. |
 | `jobs.chunk_max_attempts` | `UCG_JOBS_CHUNK_MAX_ATTEMPTS` | `3` | Attempts per chunk before its rows are marked failed. |
 | `jobs.lease_secs` | `UCG_JOBS_LEASE_SECS` | `900` | In-flight chunk lease, seconds. |
-| `jobs.single_record_upgrade` | `UCG_JOBS_SINGLE_RECORD_UPGRADE` | `false` | Re-fetch batch matches via single-record when idle to fill the JSON view. |
+| `jobs.single_record_upgrade` | `UCG_JOBS_SINGLE_RECORD_UPGRADE` | `false` | Re-fetch batch matches via single-record when idle to fill the JSON view. **Reserved: not implemented yet; has no effect.** |
 | `admin.token` | `UCG_ADMIN_TOKEN` | `—` | Bearer token for `/api/v1`, `/admin`, `/metrics`; unset = open. |
 | `admin.require_token` | `UCG_ADMIN_REQUIRE_TOKEN` | `false` | Refuse to start without a token. |
 | `admin.metrics_public` | `UCG_METRICS_PUBLIC` | `false` | Serve `/metrics` without a token. |
