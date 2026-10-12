@@ -30,7 +30,7 @@ use crate::{
     catalog::{Benchmark, Vintage},
     census::{
         batch_csv::{
-            AddressRow, BatchInputError, CoordRow, RowResult, UpstreamRow, address_rows,
+            AddressRow, BatchInputError, CoordRow, Record, RowResult, UpstreamRow, address_rows,
             coord_rows, output_writer, parse_upstream_addresses, parse_upstream_coordinates,
             read_records, upload_addresses, upload_coordinates, write_address_row, write_coord_row,
         },
@@ -66,7 +66,7 @@ trait Row: Send + Sync + 'static {
     fn upload<'a>(rows: impl IntoIterator<Item = &'a Self>) -> Vec<u8>
     where
         Self: 'a;
-    fn parse_upstream(body: &[u8]) -> Vec<UpstreamRow>;
+    fn parse_upstream(body: &[u8]) -> Result<Vec<UpstreamRow>, String>;
     fn write(
         &self,
         w: &mut csv::Writer<Vec<u8>>,
@@ -93,7 +93,7 @@ impl Row for AddressRow {
     fn upload<'a>(rows: impl IntoIterator<Item = &'a Self>) -> Vec<u8> {
         upload_addresses(rows)
     }
-    fn parse_upstream(body: &[u8]) -> Vec<UpstreamRow> {
+    fn parse_upstream(body: &[u8]) -> Result<Vec<UpstreamRow>, String> {
         parse_upstream_addresses(body)
     }
     fn write(
@@ -122,7 +122,7 @@ impl Row for CoordRow {
     fn upload<'a>(rows: impl IntoIterator<Item = &'a Self>) -> Vec<u8> {
         upload_coordinates(rows)
     }
-    fn parse_upstream(body: &[u8]) -> Vec<UpstreamRow> {
+    fn parse_upstream(body: &[u8]) -> Result<Vec<UpstreamRow>, String> {
         parse_upstream_coordinates(body)
     }
     fn write(
@@ -196,39 +196,28 @@ fn resolve(
     Ok((bench, vintage))
 }
 
-fn parse_rows<R>(
+/// Parse the uploaded file off the async workers, enforcing the row limit while
+/// reading so oversized uploads are rejected before they are materialized.
+async fn parse_rows<R: Send + 'static>(
     up: &Upload,
-    parse: impl Fn(Vec<crate::census::batch_csv::Record>) -> Result<Vec<R>, BatchInputError>,
+    parse: fn(Vec<Record>) -> Result<Vec<R>, BatchInputError>,
     max_rows: usize,
 ) -> Result<Vec<R>, Box<Response>> {
-    let Some((name, data)) = &up.file else {
+    let Some((name, data)) = up.file.clone() else {
         return Err(bad_request("Batch file must be specified"));
     };
-    let rows = read_records(data, name.as_deref())
-        .and_then(parse)
-        .map_err(|e| bad_request(e.to_string()))?;
+    let parsed = tokio::task::spawn_blocking(move || {
+        read_records(&data, name.as_deref(), max_rows).and_then(parse)
+    })
+    .await
+    .map_err(|e| {
+        Box::new(AppError::Internal(anyhow::anyhow!("batch parse task: {e}")).into_response())
+    })?;
+    let rows = parsed.map_err(|e| bad_request(e.to_string()))?;
     if rows.is_empty() {
         return Err(bad_request("Batch file contains no records"));
     }
-    if rows.len() > max_rows {
-        return Err(bad_request(format!(
-            "Batch file exceeds {} records",
-            format_thousands(max_rows)
-        )));
-    }
     Ok(rows)
-}
-
-fn format_thousands(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 async fn address_batch(
@@ -248,7 +237,7 @@ async fn address_batch(
         Err(r) => return *r,
     };
     let max_rows = st.settings().config.batch.max_rows;
-    let rows = match parse_rows(&up, address_rows, max_rows) {
+    let rows = match parse_rows(&up, address_rows, max_rows).await {
         Ok(r) => r,
         Err(r) => return *r,
     };
@@ -284,7 +273,7 @@ async fn coordinates_batch(State(st): State<SharedState>, mp: Multipart) -> Resp
         Err(r) => return *r,
     };
     let max_rows = st.settings().config.batch.max_rows;
-    let rows = match parse_rows(&up, coord_rows, max_rows) {
+    let rows = match parse_rows(&up, coord_rows, max_rows).await {
         Ok(r) => r,
         Err(r) => return *r,
     };
@@ -430,21 +419,39 @@ async fn run_batch<R: Row>(
             }
         };
         st.stats.record(Counter::UpstreamOk);
-        let by_idx: HashMap<u32, UpstreamRow> = R::parse_upstream(&resp.body)
-            .into_iter()
-            .map(|u| (u.idx, u))
-            .collect();
+        let parsed = match R::parse_upstream(&resp.body) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "upstream batch output not understood");
+                st.stats.record(Counter::UpstreamErr);
+                return AppError::BadGateway("Upstream batch response was not understood".into())
+                    .into_response();
+            }
+        };
+        let by_idx: HashMap<u32, UpstreamRow> = parsed.into_iter().map(|u| (u.idx, u)).collect();
+        // Every submitted row must be answered: an absent line is an upstream failure,
+        // never evidence of No_Match.
+        let missing = chunk
+            .iter()
+            .filter(|&&i| !by_idx.contains_key(&rows[i].idx()))
+            .count();
+        if missing > 0 {
+            warn!(
+                missing,
+                submitted = chunk.len(),
+                "upstream batch response omitted rows"
+            );
+            st.stats.record(Counter::UpstreamErr);
+            return AppError::BadGateway("Upstream batch response was incomplete".into())
+                .into_response();
+        }
 
         let now = SystemTime::now();
         let mut to_store: Vec<(String, Entry)> = Vec::new();
         let mut retries: Vec<(String, u64, u8)> = Vec::new();
-        let mut missing = 0usize;
         for &i in chunk {
             let key = keys[i].clone();
             let Some(u) = by_idx.get(&rows[i].idx()) else {
-                // Not stored, not retried: an absent line is not evidence of No_Match.
-                missing += 1;
-                fetched.insert(key, RowResult::NoMatch);
                 continue;
             };
             let result = match u.status {
@@ -479,12 +486,6 @@ async fn run_batch<R: Row>(
                 },
             ));
             fetched.insert(key, result);
-        }
-        if missing > 0 {
-            warn!(
-                missing,
-                "upstream batch response omitted rows; reported as No_Match, not cached"
-            );
         }
         let (codec, ttl_cfg) = (st.codec, cfg.ttl.clone());
         if let Err(e) = st
@@ -544,16 +545,4 @@ async fn run_batch<R: Row>(
         h.insert("x-ucg-heuristic-count", HeaderValue::from(heuristic_count));
     }
     resp
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_thousands;
-
-    #[test]
-    fn thousands() {
-        assert_eq!(format_thousands(10_000), "10,000");
-        assert_eq!(format_thousands(999), "999");
-        assert_eq!(format_thousands(1_234_567), "1,234,567");
-    }
 }

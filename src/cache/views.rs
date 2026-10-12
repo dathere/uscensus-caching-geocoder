@@ -322,9 +322,12 @@ pub fn classify_batch(
 }
 
 /// Decide, inside the write transaction, what a batch result writes over `existing`.
-/// A fresh single-record Match is kept (never downgraded to a load-dependent batch
-/// answer); a batch Match only adds its batch view to it. Otherwise the batch entry
-/// replaces whatever was there.
+///
+/// A fresh Match is never replaced by a batch No_Match/Tie (batch negatives are
+/// load-dependent). A batch Match only adds its batch view to a fresh single-record
+/// Match (one carrying `JSON` or `GEO`), and never replaces a fresh geography-complete
+/// batch Match with one lacking geography columns. Anything else (no entry, expired,
+/// or a negative) is replaced by the batch entry.
 pub fn merge_batch(
     existing: Option<&[u8]>,
     new: &Entry,
@@ -344,19 +347,27 @@ pub fn merge_batch(
         ttl(ttl_cfg, o.status, o.source, class),
         false,
     ) == Freshness::Fresh;
-    if !(fresh && o.status == Status::Match && o.views.contains(Views::JSON)) {
+    if !(fresh && o.status == Status::Match) {
         return encode_new();
     }
     if new.status != Status::Match {
         return None;
     }
-    let mut merged = o.clone();
-    merged.payload.batch.clone_from(&new.payload.batch);
-    merged.views = merged.views | Views::BATCH;
-    merged
-        .encode(codec)
-        .ok()
-        .map(|env| encode_stored(&env, old.created_at))
+    let single = o.views.contains(Views::JSON) || o.views.contains(Views::GEO);
+    if single {
+        let mut merged = o.clone();
+        merged.payload.batch.clone_from(&new.payload.batch);
+        merged.views = merged.views | Views::BATCH;
+        return merged
+            .encode(codec)
+            .ok()
+            .map(|env| encode_stored(&env, old.created_at));
+    }
+    let has_geo = |e: &Entry| e.payload.batch.as_ref().is_some_and(|b| b.state.is_some());
+    if has_geo(o) && !has_geo(new) {
+        return None;
+    }
+    encode_new()
 }
 
 #[cfg(test)]
@@ -529,5 +540,73 @@ mod batch_tests {
         let old_batch = encode_stored(&nomatch.encode(&codec).unwrap(), now);
         let replaced = decode(&m(Some(&old_batch), &matched).unwrap(), &codec).unwrap();
         assert_eq!(replaced.entry.status, Status::Match);
+    }
+
+    #[test]
+    fn merge_protects_coordinate_singles_and_geography_complete_batches() {
+        let codec = Codec::default();
+        let ttl_cfg = Config::default().ttl;
+        let now = SystemTime::now();
+        let m = |existing: &[u8], new: &Entry| {
+            merge_batch(
+                Some(existing),
+                new,
+                &codec,
+                &ttl_cfg,
+                BenchmarkClass::Current,
+                now,
+            )
+        };
+
+        // Single-record coordinates entries only carry GEO.
+        let s = UpstreamSingle::from_response(&fixture("geo_coords_all.json")).unwrap();
+        let coords = Entry {
+            status: s.status,
+            source: EntrySource::Single,
+            views: s.views,
+            verified_at: 0,
+            payload: s.payload,
+        };
+        let coords = encode_stored(&coords.encode(&codec).unwrap(), now);
+        assert_eq!(
+            m(&coords, &batch_entry(Status::NoMatch, BatchView::default())),
+            None
+        );
+        let geo_view = BatchView {
+            state: Some("24".into()),
+            ..BatchView::default()
+        };
+        let merged = decode(
+            &m(&coords, &batch_entry(Status::Match, geo_view.clone())).unwrap(),
+            &codec,
+        )
+        .unwrap();
+        assert!(merged.entry.views.contains(Views::GEO | Views::BATCH));
+
+        // A geography-complete batch Match is not replaced by a locations-only one,
+        // in either publication order.
+        let loc_view = BatchView {
+            matched_address: Some("A".into()),
+            ..BatchView::default()
+        };
+        let geo_batch = encode_stored(
+            &batch_entry(Status::Match, geo_view.clone())
+                .encode(&codec)
+                .unwrap(),
+            now,
+        );
+        let loc_batch = encode_stored(
+            &batch_entry(Status::Match, loc_view.clone())
+                .encode(&codec)
+                .unwrap(),
+            now,
+        );
+        assert_eq!(m(&geo_batch, &batch_entry(Status::Match, loc_view)), None);
+        let upgraded = decode(
+            &m(&loc_batch, &batch_entry(Status::Match, geo_view)).unwrap(),
+            &codec,
+        )
+        .unwrap();
+        assert!(upgraded.entry.payload.batch.unwrap().state.is_some());
     }
 }

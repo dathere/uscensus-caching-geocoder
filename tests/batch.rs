@@ -9,7 +9,7 @@ use axum::{
 use common::{Harness, fixture, harness, json, x_cache};
 use wiremock::{
     Mock, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{body_string_contains, method, path},
 };
 
 const BOUNDARY: &str = "ucgtestboundary";
@@ -247,6 +247,16 @@ async fn mixed_hits_and_misses_are_stitched() {
         &fields,
     )
     .await;
+    Mock::given(method("POST"))
+        .and(path("/geographies/addressbatch"))
+        .and(body_string_contains("Springfield"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#""4","1 Main St, Springfield, IL, 62701","No_Match""#,
+            "text/plain",
+        ))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
     let mut input = fixture("batch_in.csv");
     input.extend_from_slice(b"4,1 Main St,Springfield,IL,62701\n");
     let (_, headers, body) = post(&h, ADDR_GEO, "addressFile", &input, &fields).await;
@@ -255,7 +265,6 @@ async fn mixed_hits_and_misses_are_stitched() {
     let up = uploads(&h).await;
     assert_eq!(up[1], ["4,1 Main St,Springfield,IL,62701"]);
     let mut expected = fixture("batch_geo.csv");
-    // The mock answers with ids 1-3 only, so row 4 is absent upstream: No_Match, uncached.
     expected.extend_from_slice(b"\"4\",\"1 Main St, Springfield, IL, 62701\",\"No_Match\"\n");
     assert_eq!(body.as_ref(), expected.as_slice());
 }
@@ -417,4 +426,129 @@ async fn batch_no_match_does_not_replace_a_fresh_single_match() {
         1
     );
     assert_eq!(h.state.store.retry_len().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn incomplete_or_garbled_upstream_output_is_a_502_not_no_match() {
+    let h = harness(|_| {}).await;
+    Mock::given(method("POST"))
+        .and(path("/geographies/addressbatch"))
+        .and(body_string_contains("Springfield"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("<html>busy</html>", "text/html"))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    // Answers ids 1-3 only.
+    mock_post(&h, "/geographies/addressbatch", fixture("batch_geo.csv")).await;
+    let fields = [("benchmark", "4"), ("vintage", "4")];
+
+    let mut input = fixture("batch_in.csv");
+    input.extend_from_slice(b"4,1 Main St,Shelbyville,IL,62565\n");
+    let (status, _, body) = post(&h, ADDR_GEO, "addressFile", &input, &fields).await;
+    assert_eq!(status, 502);
+    assert_eq!(
+        json(&body)["errors"][0],
+        "Upstream batch response was incomplete"
+    );
+
+    let (status, _, body) = post(
+        &h,
+        ADDR_GEO,
+        "addressFile",
+        b"1,1 Main St,Springfield,IL,62701\n",
+        &fields,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert_eq!(
+        json(&body)["errors"][0],
+        "Upstream batch response was not understood"
+    );
+    assert_eq!(
+        h.state.store.retry_len().unwrap(),
+        0,
+        "no fabricated negatives"
+    );
+}
+
+#[tokio::test]
+async fn oversized_upload_is_rejected_while_reading() {
+    let h = harness(|_| {}).await;
+    let huge = "1\n".repeat(2_000_000);
+    let (status, _, body) = post(
+        &h,
+        ADDR_LOC,
+        "addressFile",
+        huge.as_bytes(),
+        &[("benchmark", "4")],
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        json(&body)["errors"][0],
+        "Batch file exceeds 10,000 records"
+    );
+    assert_eq!(h.hits().await, 0);
+}
+
+#[tokio::test]
+async fn single_refresh_does_not_resurrect_old_batch_fields() {
+    let h = harness(|_| {}).await;
+    let stale_row = r#""1","4600 Silver Hill Rd, Washington, DC, 20233","Match","Exact","4600 SILVER HILL RD, WASHINGTON, DC, 20233","-1.5,2.5","657091557","L","24","033","802405","2004""#;
+    mock_post(
+        &h,
+        "/geographies/addressbatch",
+        format!("{stale_row}\n").into_bytes(),
+    )
+    .await;
+    h.mock_json("/geographies/address", fixture("geo_address_all.json"))
+        .await;
+    let fields = [("benchmark", "4"), ("vintage", "4")];
+    let row = b"1,4600 Silver Hill Rd,Washington,DC,20233\n";
+    post(&h, ADDR_GEO, "addressFile", row, &fields).await;
+
+    // A single-record fetch replaces the batch-only entry with fresh JSON...
+    let (_, headers, _) = h
+        .get("/geocoder/geographies/address?street=4600+Silver+Hill+Rd&city=Washington&state=DC&zip=20233&benchmark=4&vintage=4&format=json")
+        .await;
+    assert_eq!(x_cache(&headers), "MISS");
+    // ...and later batch rows come from that JSON, not the old batch view.
+    let (_, headers, body) = post(&h, ADDR_GEO, "addressFile", row, &fields).await;
+    assert_eq!(x_cache(&headers), "HIT");
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("-76.92836638093,38.84505589808"), "{text}");
+    assert!(!text.contains("-1.5"), "{text}");
+}
+
+#[tokio::test]
+async fn coordinates_batch_no_match_keeps_single_coordinates_entry() {
+    let h = harness(|c| c.batch.upgrade_when_idle = true).await;
+    h.mock_json("/geographies/coordinates", fixture("geo_coords_all.json"))
+        .await;
+    mock_post(
+        &h,
+        "/geographies/coordinatesbatch",
+        br#""1","-76.92744","38.84601","No_Match""#.to_vec(),
+    )
+    .await;
+    let single = "/geocoder/geographies/coordinates?x=-76.92744&y=38.84601&benchmark=4&vintage=4&format=json";
+    h.get(single).await;
+    let (_, _, body) = post(
+        &h,
+        COORDS,
+        "coordinatesFile",
+        b"1,-76.92744,38.84601\n",
+        &[("benchmark", "4"), ("vintage", "4")],
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&body).contains("No_Match"),
+        "upstream really ran"
+    );
+    let (_, headers, _) = h.get(single).await;
+    assert_eq!(
+        x_cache(&headers),
+        "HIT",
+        "single coordinates entry survived"
+    );
 }

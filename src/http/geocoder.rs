@@ -184,9 +184,9 @@ async fn single(
             (Arc::new(s), "HIT")
         }
         miss => {
-            let (stale, existing) = match miss {
-                Lookup::Stale(s) => (Some(s.clone()), Some(s)),
-                Lookup::Miss(existing) => (None, existing),
+            let stale = match miss {
+                Lookup::Stale(s) => Some(s),
+                Lookup::Miss(_) => None,
                 Lookup::Corrupt => {
                     let (store, k) = (st.store.clone(), key.to_string());
                     tokio::spawn(async move {
@@ -194,7 +194,7 @@ async fn single(
                             warn!(error = %e, "deleting undecodable entry failed");
                         }
                     });
-                    (None, None)
+                    None
                 }
                 Lookup::Hit(_) => unreachable!("handled above"),
             };
@@ -209,7 +209,6 @@ async fn single(
                 fetch_geo,
                 need,
                 class,
-                existing,
             };
             let sf_key = format!("{key}#{}", if fetch_geo { 'g' } else { 'l' });
             match st.singleflight.run(sf_key, || job.run()).await {
@@ -274,7 +273,6 @@ struct FetchJob {
     fetch_geo: bool,
     need: Need,
     class: BenchmarkClass,
-    existing: Option<Stored>,
 }
 
 impl FetchJob {
@@ -320,18 +318,15 @@ impl FetchJob {
             }
         };
 
-        let mut entry = Entry {
+        // Batch fields of a previous entry are not carried over: they were not
+        // re-verified by this fetch and would look fresh under the new timestamp.
+        let entry = Entry {
             status: single.status,
             source: EntrySource::Single,
             views: single.views,
             verified_at: unix_now(),
             payload: single.payload,
         };
-        // Keep a batch view written earlier for this key.
-        if let Some(batch) = self.existing.and_then(|s| s.entry.payload.batch) {
-            entry.payload.batch = Some(batch);
-            entry.views = entry.views | Views::BATCH;
-        }
         let now = SystemTime::now();
         match entry.encode(st.codec) {
             Ok(envelope) => {
