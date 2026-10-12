@@ -1,11 +1,27 @@
 //! Cache entries (`cached_disk_cache`). Values are the cached-compatible stored bytes
 //! from [`crate::cache::envelope::encode_stored`]; decoding is the cache layer's job.
 
-use std::ops::Bound;
+use std::{
+    ops::Bound,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::SystemTime,
+};
 
-use redb::ReadableTableMetadata;
+use redb::{ReadableTable, ReadableTableMetadata};
 
 use super::{Store, StoreError, tables::ENTRIES};
+use crate::cache::envelope::{Header, Views, decode_stored};
+
+/// Result of a conditional put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PutOutcome {
+    Written,
+    /// A newer entry with the required views was already there; nothing written.
+    KeptExisting,
+}
 
 impl Store {
     pub fn get_entry(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -77,6 +93,43 @@ impl Store {
             Ok(())
         }))
         .await
+    }
+
+    /// Insert `stored` unless, at commit time, the key already holds an entry that has
+    /// every view in `keep_views` and was created at or after `not_before`. The check
+    /// runs inside the write transaction, so it is atomic with respect to every other
+    /// write (including ones queued in the same batch).
+    pub async fn put_entry_unless_newer(
+        &self,
+        key: String,
+        stored: Vec<u8>,
+        keep_views: Views,
+        not_before: SystemTime,
+    ) -> Result<PutOutcome, StoreError> {
+        let kept = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&kept);
+        self.write(Box::new(move |ctx| {
+            let t = ctx.entries()?;
+            let existing = t.get(key.as_str())?.map(|g| g.value().to_vec());
+            let keep = existing.is_some_and(|bytes| {
+                decode_stored(&bytes).is_ok_and(|(envelope, created_at)| {
+                    created_at >= not_before
+                        && Header::parse(&envelope).is_ok_and(|h| h.views.contains(keep_views))
+                })
+            });
+            // Ops may be re-run after a failed batch: always set the flag.
+            flag.store(keep, Ordering::SeqCst);
+            if !keep {
+                t.insert(key.as_str(), stored.as_slice())?;
+            }
+            Ok(())
+        }))
+        .await?;
+        Ok(if kept.load(Ordering::SeqCst) {
+            PutOutcome::KeptExisting
+        } else {
+            PutOutcome::Written
+        })
     }
 
     pub async fn delete_entry(&self, key: String) -> Result<(), StoreError> {
@@ -230,5 +283,92 @@ mod tests {
         assert!(after < before, "{after} >= {before}");
         assert_eq!(store.entry_count().unwrap(), 20);
         assert_eq!(store.get_entry("key0020").unwrap(), Some(blob));
+    }
+
+    fn stored_with(views: crate::cache::envelope::Views, created_at: SystemTime) -> Vec<u8> {
+        use crate::cache::{
+            codec::Codec,
+            envelope::{Entry, EntryPayload, EntrySource, Status, encode_stored},
+        };
+        let e = Entry {
+            status: Status::Match,
+            source: EntrySource::Single,
+            views,
+            verified_at: 0,
+            payload: EntryPayload::default(),
+        };
+        encode_stored(&e.encode(&Codec::default()).unwrap(), created_at)
+    }
+
+    fn views_of(store: &Store, key: &str) -> crate::cache::envelope::Views {
+        let (env, _) = decode_stored(&store.get_entry(key).unwrap().unwrap()).unwrap();
+        Header::parse(&env).unwrap().views
+    }
+
+    #[tokio::test]
+    async fn conditional_put_is_atomic_within_one_batch_window() {
+        use crate::cache::envelope::Views;
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = opts(dir.path());
+        o.writer.flush = std::time::Duration::from_millis(50);
+        let store = Store::open(&o).unwrap();
+        let fetch_started = SystemTime::now();
+        let geo = stored_with(Views::JSON | Views::GEO, SystemTime::now());
+        let loc = stored_with(Views::JSON, SystemTime::now());
+
+        // Geographies write queued first, locations-only second, same transaction.
+        let (a, b) = tokio::join!(
+            store.put_entry("k".into(), geo.clone()),
+            store.put_entry_unless_newer("k".into(), loc.clone(), Views::GEO, fetch_started),
+        );
+        a.unwrap();
+        assert_eq!(b.unwrap(), PutOutcome::KeptExisting);
+        assert!(views_of(&store, "k").contains(Views::GEO));
+
+        // Opposite order: the locations-only write lands, then geographies replaces it.
+        let (b, a) = tokio::join!(
+            store.put_entry_unless_newer("k2".into(), loc, Views::GEO, fetch_started),
+            store.put_entry("k2".into(), geo),
+        );
+        assert_eq!(b.unwrap(), PutOutcome::Written);
+        a.unwrap();
+        assert!(views_of(&store, "k2").contains(Views::GEO));
+    }
+
+    #[tokio::test]
+    async fn conditional_put_replaces_older_or_insufficient_entries() {
+        use crate::cache::envelope::Views;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&opts(dir.path())).unwrap();
+        let t0 = SystemTime::now();
+        let old_geo = stored_with(
+            Views::JSON | Views::GEO,
+            t0 - std::time::Duration::from_secs(60),
+        );
+        store.put_entry("old".into(), old_geo).await.unwrap();
+        let loc = stored_with(Views::JSON, t0);
+        let r = store
+            .put_entry_unless_newer("old".into(), loc.clone(), Views::GEO, t0)
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            PutOutcome::Written,
+            "an entry from before this fetch began is replaced"
+        );
+
+        store
+            .put_entry("json".into(), stored_with(Views::JSON, t0))
+            .await
+            .unwrap();
+        let r = store
+            .put_entry_unless_newer("json".into(), loc, Views::GEO, t0)
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            PutOutcome::Written,
+            "an entry without the GEO view is replaced"
+        );
     }
 }

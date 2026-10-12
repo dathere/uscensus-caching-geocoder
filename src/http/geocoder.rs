@@ -295,6 +295,7 @@ impl FetchJob {
             }
         }
 
+        let fetch_started = SystemTime::now();
         let q = SingleQuery {
             input: &self.input,
             benchmark_id: self.benchmark_id,
@@ -333,30 +334,22 @@ impl FetchJob {
             entry.views = entry.views | Views::BATCH;
         }
         let now = SystemTime::now();
-        // A locations-only fetch (fetch_geographies_always=false) must not replace a
-        // fresh geographies entry that a concurrent fetch stored meanwhile.
-        if !self.fetch_geo
-            && let Ok(Some(bytes)) = st.store.get_entry(self.key.as_str())
-        {
-            let cfg = st.settings();
-            if let Lookup::Hit(s) = classify(
-                Some(&bytes),
-                st.codec,
-                &cfg.config,
-                self.class,
-                Need::Geographies,
-                now,
-            ) {
-                return Ok(Arc::new(s));
-            }
-        }
         match entry.encode(st.codec) {
             Ok(envelope) => {
-                if let Err(e) = st
-                    .store
-                    .put_entry(self.key.to_string(), encode_stored(&envelope, now))
-                    .await
-                {
+                let key = self.key.to_string();
+                let value = encode_stored(&envelope, now);
+                let written = if self.fetch_geo {
+                    st.store.put_entry(key, value).await
+                } else {
+                    // A locations-only fetch (fetch_geographies_always=false) must not
+                    // replace a geographies entry a concurrent fetch stored after this
+                    // one started; checked atomically inside the write transaction.
+                    st.store
+                        .put_entry_unless_newer(key, value, Views::GEO, fetch_started)
+                        .await
+                        .map(drop)
+                };
+                if let Err(e) = written {
                     warn!(error = %e, key = %self.key, "storing entry failed; serving uncached");
                 }
             }
