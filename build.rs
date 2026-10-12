@@ -1,6 +1,13 @@
 use std::process::Command;
 
 fn main() {
+    // The dictionary is embedded with include_bytes!. An empty file is allowed only to
+    // bootstrap `ucgeocoder train-dict` (see docs/PLAN.md Phase 2).
+    println!("cargo:rerun-if-changed=resources/census.dict");
+    assert!(
+        std::path::Path::new("resources/census.dict").exists(),
+        "resources/census.dict is missing; create it with `ucgeocoder train-dict` (an empty file bootstraps the build)"
+    );
     println!("cargo:rerun-if-env-changed=UCG_GIT_SHA");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");

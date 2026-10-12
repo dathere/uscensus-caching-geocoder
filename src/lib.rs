@@ -1,7 +1,10 @@
 //! ucgeocoder: a caching, rate-limited, wire-compatible proxy for the US Census Geocoder.
 
+pub mod cache;
+pub mod catalog;
 pub mod cli;
 pub mod config;
+pub mod dict;
 pub mod error;
 pub mod http;
 pub mod state;

@@ -54,6 +54,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Train the zstd dictionary from captured upstream responses (dev tool)
+    TrainDict {
+        /// Directory of raw single-record JSON responses (scripts/capture.py samples)
+        #[arg(long, value_name = "DIR")]
+        samples: PathBuf,
+        /// Output dictionary path
+        #[arg(
+            short,
+            long,
+            value_name = "PATH",
+            default_value = "resources/census.dict"
+        )]
+        output: PathBuf,
+        /// Maximum dictionary size in bytes
+        #[arg(long, default_value_t = crate::dict::train::DEFAULT_MAX_SIZE)]
+        max_size: usize,
+    },
 }
 
 fn parse_key_value(s: &str) -> Result<(String, String), String> {
@@ -123,6 +140,15 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::CheckConfig { json } => {
             print_config(&settings, json)?;
+            Ok(())
+        }
+        Command::TrainDict {
+            samples,
+            output,
+            max_size,
+        } => {
+            let report = crate::dict::train::run(&samples, &output, max_size)?;
+            println!("{report}\nwrote {}", output.display());
             Ok(())
         }
     }

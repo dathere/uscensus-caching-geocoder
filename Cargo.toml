@@ -26,16 +26,21 @@ arc-swap = "1.9.2"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 humantime = "2.4.0"
+redb = "4"
+rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11.19"
 serde_json = { version = "1.0.154", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+zstd = "0.14"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
+cached = { version = "4", default-features = false, features = ["redb_store"] }
 http-body-util = "0.1.5"
 predicates = "3.1.4"
 tempfile = "3.27.0"
