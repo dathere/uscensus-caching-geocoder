@@ -8,6 +8,7 @@ pub mod dict;
 pub mod error;
 pub mod http;
 pub mod state;
+pub mod store;
 pub mod telemetry;
 
 /// Crate version plus the git commit it was built from.

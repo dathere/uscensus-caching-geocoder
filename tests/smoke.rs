@@ -15,6 +15,7 @@ use ucgeocoder::{
     config::{self, Layers},
     http::router,
     state::AppState,
+    store::{Store, StoreOptions},
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_ucgeocoder");
@@ -33,7 +34,10 @@ async fn healthz_via_router() {
         flags: &[],
     })
     .unwrap();
-    let resp = router(AppState::new(settings))
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        Store::open(&StoreOptions::from(&settings.config.store).with_dir(dir.path())).unwrap();
+    let resp = router(AppState::new(settings, store))
         .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -42,7 +46,7 @@ async fn healthz_via_router() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "ok");
     assert_eq!(v["breaker"], "closed");
-    assert!(v["db_ok"].is_null());
+    assert_eq!(v["db_ok"], true);
 }
 
 #[test]
@@ -159,4 +163,5 @@ fn serve_binds_and_answers_healthz() {
     stream.read_to_string(&mut resp).unwrap();
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     assert!(resp.contains(r#""status":"ok""#), "{resp}");
+    assert!(dir.path().join("geocode-census_v3.redb").exists());
 }

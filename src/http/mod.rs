@@ -1,5 +1,7 @@
 //! HTTP surface: router assembly and the server loop.
 
+use std::time::Duration;
+
 use anyhow::Context;
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
@@ -10,6 +12,7 @@ use crate::{
     VERSION,
     config::Settings,
     state::{AppState, SharedState},
+    store::{Store, StoreOptions, stats::spawn_stats_flusher},
 };
 
 pub fn router(state: SharedState) -> Router {
@@ -18,8 +21,8 @@ pub fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-/// `/healthz` body. `breaker`, `db_ok` and `upstream_last_ok_at` are placeholders
-/// (`"closed"`, `null`, `null`) until the store (Phase 3) and upstream (Phase 4) exist.
+/// `/healthz` body. `breaker` and `upstream_last_ok_at` are placeholders (`"closed"`,
+/// `null`) until the upstream client exists (Phase 4).
 #[derive(Debug, Serialize)]
 pub struct Health {
     pub status: &'static str,
@@ -31,12 +34,13 @@ pub struct Health {
 }
 
 async fn healthz(State(state): State<SharedState>) -> Json<Health> {
+    let db_ok = state.store.is_healthy();
     Json(Health {
-        status: "ok",
+        status: if db_ok { "ok" } else { "degraded" },
         version: VERSION,
         uptime_secs: state.started_at.elapsed().as_secs(),
         breaker: "closed",
-        db_ok: None,
+        db_ok: Some(db_ok),
         upstream_last_ok_at: None,
     })
 }
@@ -49,16 +53,29 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
             "UCG_ADMIN_TOKEN is not set: admin routes are open to anyone who can reach this server"
         );
     }
-    let state = AppState::new(settings);
+    let store = Store::open(&StoreOptions::from(&cfg.store))?;
+    info!(path = %store.path().display(), entries = store.entry_count()?, "store opened");
+    let state = AppState::new(settings, store);
+    let flusher = spawn_stats_flusher(
+        state.store.clone(),
+        state.stats.clone(),
+        Duration::from_secs(cfg.store.hitcount_flush_secs),
+    );
     let listener = TcpListener::bind(cfg.server.bind)
         .await
         .with_context(|| format!("binding {}", cfg.server.bind))?;
     let addr = listener.local_addr()?;
     info!(%addr, version = VERSION, "listening");
-    axum::serve(listener, router(state))
+    axum::serve(listener, router(state.clone()))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    flusher.abort();
+    if let Err(e) = state.store.flush_stats(&state.stats).await {
+        warn!(error = %e, "final stats flush failed");
+    }
+    // Dropping the last Store clone drains the writer and commits durably.
+    drop(state);
     info!("shut down");
     Ok(())
 }
