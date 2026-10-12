@@ -279,33 +279,31 @@ async fn live_census_behaviour() {
         )
         .await;
     assert_eq!((c.status, p.status), (StatusCode::OK, StatusCode::OK));
-    let shapes = |body: &[u8]| -> Vec<(usize, String)> {
-        csv::ReaderBuilder::new()
+    // Every row must be a well-formed locations row; only the outcome may vary.
+    let check = |who: &str, body: &[u8]| -> usize {
+        let mut n = 0;
+        for r in csv::ReaderBuilder::new()
             .has_headers(false)
             .flexible(true)
             .from_reader(body)
             .records()
-            .map(|r| {
-                let r = r.unwrap();
-                (r.len(), r.get(2).unwrap_or_default().to_owned())
-            })
-            .collect()
-    };
-    for (len, kind) in shapes(&c.body) {
-        if kind == "Tie" || kind == "No_Match" {
-            assert_eq!(len, 3, "census {kind} row");
+        {
+            let r = r.unwrap();
+            let want = match r.get(2) {
+                Some("Match") => 8,
+                Some("Tie" | "No_Match") => 3,
+                other => panic!("{who}: unexpected status {other:?} in {r:?}"),
+            };
+            assert_eq!(r.len(), want, "{who}: {r:?}");
+            n += 1;
         }
-    }
+        n
+    };
     assert_eq!(
-        shapes(&p.body).len(),
-        shapes(&c.body).len(),
+        check("proxy", &p.body),
+        check("census", &c.body),
         "tie: row count"
     );
-    for (len, kind) in shapes(&p.body) {
-        if kind == "Tie" || kind == "No_Match" {
-            assert_eq!(len, 3, "proxy {kind} row");
-        }
-    }
 
     // §11.5: coordinates No_Match rows are `"id","x","y","No_Match"`.
     let coords = fixture("coords_nomatch_in.csv");
