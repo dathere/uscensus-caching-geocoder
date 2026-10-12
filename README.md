@@ -283,11 +283,11 @@ Precedence, lowest to highest: built-in defaults, a TOML file (`--config` or `UC
 | `batch.chunk_size` | `UCG_BATCH_CHUNK_SIZE` | `2000` | Rows per upstream batch upload. |
 | `batch.max_rows` | `UCG_BATCH_MAX_ROWS` | `10000` | Maximum rows accepted per request. |
 | `batch.upgrade_when_idle` | `UCG_BATCH_UPGRADE_WHEN_IDLE` | `false` | Send heuristically-matched rows upstream when the limiter is idle. |
-| `batch.serve_partial_json_from_batch` | `UCG_SERVE_PARTIAL_JSON_FROM_BATCH` | `false` | Synthesize partial single-record JSON from batch-only entries. **Reserved: not implemented yet; has no effect.** |
+| `batch.serve_partial_json_from_batch` | `UCG_SERVE_PARTIAL_JSON_FROM_BATCH` | `false` | Synthesize partial single-record JSON from batch-only entries (reserved; not implemented yet). **Has no effect.** |
 | `jobs.chunk_size` | `UCG_JOBS_CHUNK_SIZE` | `2000` | Rows per job chunk. |
 | `jobs.chunk_max_attempts` | `UCG_JOBS_CHUNK_MAX_ATTEMPTS` | `3` | Attempts per chunk before its rows are marked failed. |
 | `jobs.lease_secs` | `UCG_JOBS_LEASE_SECS` | `900` | In-flight chunk lease, seconds. |
-| `jobs.single_record_upgrade` | `UCG_JOBS_SINGLE_RECORD_UPGRADE` | `false` | Re-fetch batch matches via single-record when idle to fill the JSON view. **Reserved: not implemented yet; has no effect.** |
+| `jobs.single_record_upgrade` | `UCG_JOBS_SINGLE_RECORD_UPGRADE` | `false` | Re-fetch batch matches via single-record when idle to fill the JSON view (reserved; not implemented yet). **Has no effect.** |
 | `admin.token` | `UCG_ADMIN_TOKEN` | `—` | Bearer token for `/api/v1`, `/admin`, `/metrics`; unset = open. |
 | `admin.require_token` | `UCG_ADMIN_REQUIRE_TOKEN` | `false` | Refuse to start without a token. |
 | `admin.metrics_public` | `UCG_METRICS_PUBLIC` | `false` | Serve `/metrics` without a token. |

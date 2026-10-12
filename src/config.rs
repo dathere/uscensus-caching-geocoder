@@ -390,7 +390,7 @@ define_config! {
         max_rows: usize = "10000", env = "UCG_BATCH_MAX_ROWS";
         /// Send heuristically-matched rows upstream when the limiter is idle.
         upgrade_when_idle: bool = "false", env = "UCG_BATCH_UPGRADE_WHEN_IDLE";
-        /// Synthesize partial single-record JSON from batch-only entries.
+        /// Synthesize partial single-record JSON from batch-only entries (reserved; not implemented yet).
         serve_partial_json_from_batch: bool = "false", env = "UCG_SERVE_PARTIAL_JSON_FROM_BATCH";
     }
     /// Async background jobs.
@@ -401,7 +401,7 @@ define_config! {
         chunk_max_attempts: u32 = "3", env = "UCG_JOBS_CHUNK_MAX_ATTEMPTS";
         /// In-flight chunk lease, seconds.
         lease_secs: u64 = "900", env = "UCG_JOBS_LEASE_SECS";
-        /// Re-fetch batch matches via single-record when idle to fill the JSON view.
+        /// Re-fetch batch matches via single-record when idle to fill the JSON view (reserved; not implemented yet).
         single_record_upgrade: bool = "false", env = "UCG_JOBS_SINGLE_RECORD_UPGRADE";
     }
     /// Admin API authentication.
