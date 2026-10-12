@@ -120,7 +120,10 @@ impl Store {
             if !retries.is_empty() {
                 let q = ctx.retry_queue()?;
                 for (key, due, attempts) in &retries {
-                    q.insert((*due, key.as_str()), *attempts)?;
+                    // Never overwrite an existing item (and its attempt count).
+                    if q.get((*due, key.as_str()))?.is_none() {
+                        q.insert((*due, key.as_str()), *attempts)?;
+                    }
                 }
             }
             Ok(())
@@ -515,5 +518,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r, PutOutcome::Written);
+    }
+
+    #[tokio::test]
+    async fn queued_retries_never_overwrite_an_existing_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&opts(dir.path())).unwrap();
+        store.retry_enqueue("k".into(), 100, 2).await.unwrap();
+        store
+            .put_entries_with(
+                vec![("k".to_owned(), b"v".to_vec())],
+                |_, v: &Vec<u8>| Some(v.clone()),
+                vec![("k".to_owned(), 100, 0), ("j".to_owned(), 100, 0)],
+            )
+            .await
+            .unwrap();
+        let due = store.retry_due(u64::MAX, 10).unwrap();
+        let attempts: Vec<(String, u8)> = due.into_iter().map(|i| (i.key, i.attempts)).collect();
+        assert_eq!(attempts, [("j".to_owned(), 0), ("k".to_owned(), 2)]);
     }
 }

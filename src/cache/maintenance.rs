@@ -15,6 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::value::RawValue;
@@ -207,7 +208,7 @@ pub struct Imported {
 /// can never serve an empty answer as a cache hit.
 pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<Imported, RecordError> {
     let invalid = |m: String| Err(RecordError::Invalid(m));
-    CacheKey::parse(&rec.key).map_err(|e| RecordError::Invalid(e.to_string()))?;
+    let parsed_key = CacheKey::parse(&rec.key).map_err(|e| RecordError::Invalid(e.to_string()))?;
     if rec.views == 0 || rec.views > 0x07 {
         return invalid(format!("invalid views {}", rec.views));
     }
@@ -230,6 +231,11 @@ pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<Imported, Recor
         if empty {
             return invalid("a Match needs a non-empty `json` array or object".into());
         }
+    }
+    if let Some(j) = &rec.json
+        && let Err(m) = check_json_shape(parsed_key.search_type, views, j.get())
+    {
+        return invalid(m);
     }
     if rec.created_at_nanos >= 1_000_000_000 {
         return invalid("`created_at_nanos` must be below 1e9".into());
@@ -257,6 +263,30 @@ pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<Imported, Recor
         stored: encode_stored(&entry.encode(codec)?, created_at),
         needs_retry,
     })
+}
+
+/// The stored JSON must have the shape the renderer reads: an array of match objects
+/// for address searches (each with a `geographies` object of layers when the entry has
+/// the GEO view), a `geographies` object of layers for coordinates.
+fn check_json_shape(st: SearchType, views: Views, json: &str) -> Result<(), String> {
+    type Layers<'a> = IndexMap<String, &'a RawValue>;
+    if st == SearchType::Coordinates {
+        return serde_json::from_str::<Layers<'_>>(json)
+            .map(drop)
+            .map_err(|e| format!("coordinates `json` must be a geographies object: {e}"));
+    }
+    let matches: Vec<IndexMap<String, &RawValue>> = serde_json::from_str(json)
+        .map_err(|e| format!("address `json` must be an array of match objects: {e}"))?;
+    if views.contains(Views::GEO) {
+        for m in &matches {
+            let geo = m
+                .get("geographies")
+                .ok_or("a match of a geo entry lacks `geographies`")?;
+            serde_json::from_str::<Layers<'_>>(geo.get())
+                .map_err(|e| format!("`geographies` must be an object of layers: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// The result of parsing an import body.
@@ -467,6 +497,22 @@ mod tests {
         let s = decode_stored(&p.records[0].stored).unwrap();
         let e = Entry::decode(&s.0, c).unwrap();
         assert_eq!(e.payload.json.unwrap().as_slice(), pretty.as_bytes());
+
+        // Shapes the renderer cannot read are rejected.
+        for (json, views) in [(r#"{"x":1}"#, 1), ("[1]", 1), (r#"[{"a":1}]"#, 3)] {
+            let r =
+                serde_json::from_str::<ExportRecord>(&record(Some(json), Status::Match, views, 5))
+                    .unwrap();
+            assert!(import_record(r, c).is_err(), "{json} views {views}");
+        }
+        let ok = serde_json::from_str::<ExportRecord>(&record(
+            Some(r#"[{"a":1,"geographies":{"States":[{"GEOID":"24"}]}}]"#),
+            Status::Match,
+            3,
+            5,
+        ))
+        .unwrap();
+        assert!(import_record(ok, c).is_ok());
 
         let mut nm =
             serde_json::from_str::<ExportRecord>(&record(Some("[]"), Status::NoMatch, 1, 5))
