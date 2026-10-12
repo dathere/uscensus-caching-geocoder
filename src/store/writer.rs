@@ -147,7 +147,13 @@ fn run(db: &RwLock<Database>, rx: &mpsc::Receiver<Msg>, cfg: WriterConfig) {
     // I/O); from then on every request fails fast instead of retrying forever.
     let mut broken = false;
     loop {
-        let first = match rx.recv_timeout(sched.idle_wait(Instant::now())) {
+        // A broken writer only answers requests; it never schedules commits.
+        let wait = if broken {
+            Schedule::IDLE_WAIT
+        } else {
+            sched.idle_wait(Instant::now())
+        };
+        let first = match rx.recv_timeout(wait) {
             Ok(m) => m,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !broken && sched.due(Instant::now()) {
@@ -175,7 +181,13 @@ fn run(db: &RwLock<Database>, rx: &mpsc::Receiver<Msg>, cfg: WriterConfig) {
             if shutdown || !flushes.is_empty() || ops.len() >= cfg.max_batch.max(1) {
                 break;
             }
-            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            // recv_timeout(0) still returns queued messages, so check the deadline first
+            // or a steady backlog would keep postponing an overdue durable commit.
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match rx.recv_timeout(deadline - now) {
                 Ok(m) => next = Some(m),
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => shutdown = true,
@@ -315,7 +327,8 @@ impl Schedule {
                 self.last_durable = now;
                 self.failures = self.failures.saturating_add(1);
             }
-            (false, false) => {}
+            // Individual retries inside a failed batch may have committed: assume so.
+            (false, false) => self.dirty = true,
         }
     }
 }
@@ -456,5 +469,27 @@ mod tests {
     fn previous_io_is_terminal() {
         assert!(is_terminal(&StoreError::Redb(redb::Error::PreviousIo)));
         assert!(!is_terminal(&StoreError::Write("x".into())));
+    }
+
+    #[test]
+    fn partially_failed_batch_still_owes_a_durable_commit() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(S, t0);
+        s.on_commit(false, false, t0);
+        assert!(s.due(t0 + S));
+    }
+
+    #[tokio::test]
+    async fn rejected_op_in_batch_does_not_lose_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&crate::store::test_util::opts(dir.path())).unwrap();
+        let ok = store.put_entry("good".into(), b"v".to_vec());
+        let bad = store.write(Box::new(|_| Err(StoreError::Write("rejected".into()))));
+        let (ok, bad) = tokio::join!(ok, bad);
+        ok.unwrap();
+        assert!(bad.is_err());
+        drop(store);
+        let store = crate::store::Store::open(&crate::store::test_util::opts(dir.path())).unwrap();
+        assert_eq!(store.get_entry("good").unwrap(), Some(b"v".to_vec()));
     }
 }
