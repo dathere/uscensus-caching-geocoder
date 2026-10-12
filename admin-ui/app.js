@@ -84,7 +84,13 @@ function confirmButton(label, action, confirmLabel = `Confirm ${label.toLowerCas
     b.disabled = true;
     try {
       await action();
+    } catch (e) {
+      report(e);
     } finally {
+      // Always disarm: a failed action must not leave a one-click destructive button.
+      armed = false;
+      b.textContent = label;
+      b.classList.remove("armed");
       b.disabled = false;
     }
   });
@@ -235,8 +241,9 @@ document.querySelectorAll("#nav a").forEach((a) =>
   }),
 );
 window.addEventListener("popstate", () => show(tabFromPath(), false));
+// Only the polling tabs refresh on focus (Config may hold unsaved edits).
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshCurrent();
+  if (!document.hidden && (current === "dashboard" || current === "jobs")) refreshCurrent();
 });
 
 // ---------------------------------------------------------------- dashboard
@@ -342,7 +349,7 @@ $("dash-detail-refresh").addEventListener("click", loadDetail);
 
 // ------------------------------------------------------------------ entries
 
-const entriesState = { loaded: false, query: {}, cursors: [null], page: 0, next: null };
+const entriesState = { loaded: false, query: {}, cursors: [null], page: 0, next: null, gen: 0 };
 
 function entriesUrl(cursor) {
   const p = new URLSearchParams();
@@ -352,10 +359,15 @@ function entriesUrl(cursor) {
 }
 
 async function loadEntries() {
-  entriesState.loaded = true;
+  // Only the latest request may update the list and the cursor.
+  const gen = ++entriesState.gen;
   const cursor = entriesState.cursors[entriesState.page];
+  $("entries-prev").disabled = true;
+  $("entries-next").disabled = true;
   try {
     const page = await apiJson(entriesUrl(cursor));
+    if (gen !== entriesState.gen) return;
+    entriesState.loaded = true;
     entriesState.next = page.next_cursor;
     const list = $("entries-list");
     if (!page.entries.length) {
@@ -393,6 +405,8 @@ async function loadEntries() {
     $("entries-next").disabled = !page.next_cursor;
     $("entries-page").textContent = `page ${entriesState.page + 1}`;
   } catch (e) {
+    if (gen !== entriesState.gen) return;
+    $("entries-prev").disabled = entriesState.page === 0;
     report(e);
   }
 }
@@ -405,7 +419,9 @@ $("entries-filter").addEventListener("submit", (ev) => {
   loadEntries();
 });
 $("entries-next").addEventListener("click", () => {
+  if (!entriesState.next) return;
   entriesState.cursors[entriesState.page + 1] = entriesState.next;
+  entriesState.next = null;
   entriesState.page++;
   loadEntries();
 });
@@ -528,8 +544,16 @@ function jobsTable(jobs, actions) {
 
 async function loadJobs() {
   try {
-    const page = await apiJson("/api/v1/jobs?limit=200");
-    clear($("jobs-list"), jobsTable(page.jobs.slice().reverse(), true));
+    // The API lists oldest first: collect every page, then show newest first.
+    const jobs = [];
+    let cursor = null;
+    do {
+      const q = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+      const page = await apiJson(`/api/v1/jobs?limit=1000${q}`);
+      jobs.push(...page.jobs);
+      cursor = page.next_cursor;
+    } while (cursor);
+    clear($("jobs-list"), jobsTable(jobs.reverse(), true));
   } catch (e) {
     report(e);
   }
