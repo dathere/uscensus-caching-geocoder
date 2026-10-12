@@ -1,0 +1,14 @@
+HTTP/1.1 200 
+Date: Mon, 12 Oct 2026 17:07:43 GMT
+Content-Type: text/plain
+Content-Length: 365
+Connection: keep-alive
+X-Frame-Options: DENY
+Cache-Control: private, no-store
+Strict-Transport-Security: max-age=31536000
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1;mode=block
+Content-Disposition: attachment; filename=GeocodeResults.csv
+Vary: Origin
+Set-Cookie: TS0193e6a1=01283c52a40355a032abd5b592bb647e3506e87d413d59477c2ef38bbe38e6559f2f7aa05c5c0056abcbad612b0e37ce5c4de09e97; Path=/; Domain=.geocoding.geo.census.gov; Secure; HttpOnly
+

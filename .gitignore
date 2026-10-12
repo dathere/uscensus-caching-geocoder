@@ -1,0 +1,8 @@
+# roborev snapshots
+/.roborev/
+
+# build / local state
+/target/
+/data/
+/resources/samples/
+.DS_Store
