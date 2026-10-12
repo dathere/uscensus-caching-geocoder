@@ -6,3 +6,4 @@
 /data/
 /resources/samples/
 .DS_Store
+scripts/__pycache__/

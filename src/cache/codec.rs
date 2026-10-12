@@ -13,6 +13,9 @@ use zstd::dict::{DecoderDictionary, EncoderDictionary};
 /// dictionary" (used only to bootstrap `train-dict`).
 pub static EMBEDDED_DICT: &[u8] = include_bytes!("../../resources/census.dict");
 
+/// The dictionary that `census.dict` replaced (empty if none). Decode-only.
+pub static PREVIOUS_DICT: &[u8] = include_bytes!("../../resources/census.prev.dict");
+
 /// Compression level. Writes are rare relative to reads, so favour ratio.
 pub const LEVEL: i32 = 9;
 
@@ -104,19 +107,23 @@ impl Codec {
         }
     }
 
-    /// Codec using the dictionary embedded at build time (shared, built once).
+    /// Codec using the dictionaries embedded at build time (shared, built once):
+    /// `census.dict` for new entries, plus `census.prev.dict` (written by `train-dict`
+    /// when it replaces a dictionary) so entries from before a retrain stay readable.
     pub fn embedded() -> &'static Codec {
         static CODEC: OnceLock<Codec> = OnceLock::new();
         CODEC.get_or_init(|| {
-            let dict = if EMBEDDED_DICT.is_empty() {
-                None
-            } else {
-                Some(
-                    Dictionary::new(EMBEDDED_DICT)
-                        .expect("resources/census.dict is not a valid zstd dictionary"),
-                )
+            let load = |raw: &[u8], name: &str| {
+                (!raw.is_empty()).then(|| {
+                    Dictionary::new(raw).unwrap_or_else(|e| {
+                        panic!("resources/{name} is not a valid zstd dictionary: {e}")
+                    })
+                })
             };
-            Codec::new(dict, Vec::new())
+            let current = load(EMBEDDED_DICT, "census.dict");
+            let previous = load(PREVIOUS_DICT, "census.prev.dict")
+                .filter(|p| current.as_ref().is_none_or(|c| c.id != p.id));
+            Codec::new(current, previous.into_iter().collect())
         })
     }
 

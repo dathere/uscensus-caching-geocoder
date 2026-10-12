@@ -30,12 +30,13 @@ def get(url, params=None):
     global _last
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
-    wait = _last + MIN_GAP - time.monotonic()
-    if wait > 0:
-        time.sleep(wait)
-    _last = time.monotonic()
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     for attempt in range(4):
+        # Throttle every attempt, retries included, so starts stay >= MIN_GAP apart.
+        wait = _last + MIN_GAP - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return r.status, r.read()
@@ -69,7 +70,11 @@ def normalize_default_layers(default_layers):
     """Probe points only reveal layers that cover them. Fill in the mutually exclusive
     partners named by the Census API docs (PLAN.md §11.1) and drop vintages that
     returned nothing (an empty list would filter out every layer)."""
-    pairs = [("Incorporated Places", "Census Designated Places"), ("Urbanized Areas", "Urban Clusters")]
+    pairs = [
+        ("Incorporated Places", "Census Designated Places"),
+        ("Urbanized Areas", "Urban Clusters"),
+        ("2010 Census Urbanized Areas", "2010 Census Urban Clusters"),  # ACS2017-ACS2019 names
+    ]
     out = {}
     for name, layers in default_layers.items():
         if not layers:

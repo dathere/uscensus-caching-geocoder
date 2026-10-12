@@ -17,4 +17,4 @@
 ## Invariants
 - Store file must remain readable by `cached::RedbCache<String, Vec<u8>>` (table `cached_disk_cache`, file `<name>_v3.redb`, value = positional rmp `[bin(envelope), SystemTime]`); guarded by `tests/compat_cached.rs`.
 - Upstream raw JSON segments (`addressMatches` array / coordinates `geographies` object) are stored byte-exact; `result.input` is always rebuilt from the request + catalog raw objects.
-- `resources/census.dict` is `include_bytes!`ed; an empty file only bootstraps `train-dict`. Retraining changes `dict_id`; old ids need the previous dict kept in `Codec` or entries become misses.
+- `resources/census.dict` is `include_bytes!`ed; an empty file only bootstraps `train-dict`. Retraining changes `dict_id`; `train-dict` moves the outgoing dict to `resources/census.prev.dict` (embedded decode-only by `Codec::embedded`). Only one previous generation is kept: two retrains between server runs still orphan the oldest entries.

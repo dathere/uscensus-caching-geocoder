@@ -42,7 +42,8 @@
   "2010 Census Urbanized Areas",
   "Census Tracts",
   "Census Designated Places",
-  "2016 State Legislative Districts - Lower"
+  "2016 State Legislative Districts - Lower",
+  "2010 Census Urban Clusters"
  ],
  "ACS2018_Current": [
   "2018 State Legislative Districts - Upper",
@@ -55,7 +56,8 @@
   "116th Congressional Districts",
   "Census Tracts",
   "Census Designated Places",
-  "2018 State Legislative Districts - Lower"
+  "2018 State Legislative Districts - Lower",
+  "2010 Census Urban Clusters"
  ],
  "ACS2019_Current": [
   "2018 State Legislative Districts - Upper",
@@ -68,7 +70,8 @@
   "116th Congressional Districts",
   "Census Tracts",
   "Census Designated Places",
-  "2018 State Legislative Districts - Lower"
+  "2018 State Legislative Districts - Lower",
+  "2010 Census Urban Clusters"
  ],
  "Census2020_Current": [
   "2018 State Legislative Districts - Upper",
@@ -202,7 +205,8 @@
   "2010 Census Urbanized Areas",
   "Census Tracts",
   "Census Designated Places",
-  "2016 State Legislative Districts - Lower"
+  "2016 State Legislative Districts - Lower",
+  "2010 Census Urban Clusters"
  ],
  "ACS2018_ACS2026": [
   "2018 State Legislative Districts - Upper",
@@ -215,7 +219,8 @@
   "116th Congressional Districts",
   "Census Tracts",
   "Census Designated Places",
-  "2018 State Legislative Districts - Lower"
+  "2018 State Legislative Districts - Lower",
+  "2010 Census Urban Clusters"
  ],
  "ACS2019_ACS2026": [
   "2018 State Legislative Districts - Upper",
@@ -228,7 +233,8 @@
   "116th Congressional Districts",
   "Census Tracts",
   "Census Designated Places",
-  "2018 State Legislative Districts - Lower"
+  "2018 State Legislative Districts - Lower",
+  "2010 Census Urban Clusters"
  ],
  "Census2020_ACS2026": [
   "2018 State Legislative Districts - Upper",

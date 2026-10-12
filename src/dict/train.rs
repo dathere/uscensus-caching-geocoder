@@ -106,9 +106,19 @@ pub fn train(
 }
 
 /// Load samples from `samples_dir`, train, and write the dictionary to `out`.
+///
+/// If `out` already holds a dictionary, it is first moved to `census.prev.dict` next to
+/// it, which the binary embeds as a decode-only dictionary: without it every entry
+/// compressed before the retrain would become an unknown-dictionary miss.
 pub fn run(samples_dir: &Path, out: &Path, max_size: usize) -> anyhow::Result<TrainReport> {
     let (samples, skipped) = load_samples(samples_dir)?;
     let (dict, report) = train(&samples, skipped, max_size)?;
+    if let Ok(old) = std::fs::read(out)
+        && codec::dict_id(&old).is_some_and(|id| id != report.dict_id)
+    {
+        let prev = out.with_file_name("census.prev.dict");
+        std::fs::write(&prev, &old).with_context(|| format!("writing {}", prev.display()))?;
+    }
     std::fs::write(out, &dict).with_context(|| format!("writing {}", out.display()))?;
     Ok(report)
 }
@@ -140,6 +150,40 @@ mod tests {
             Some(report.dict_id)
         );
         assert!(report.holdout_dict_bytes < report.holdout_zstd_bytes);
+    }
+
+    #[test]
+    fn retrain_keeps_previous_dictionary() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/live/geo_coords_all.json"
+        ))
+        .unwrap();
+        let write = |n: usize, tag: &str| {
+            for i in 0..n {
+                let body = base.replace("Maryland", &format!("{tag}{i}"));
+                std::fs::write(dir.path().join(format!("{tag}{i:04}.json")), body).unwrap();
+            }
+        };
+        let out = dir.path().join("census.dict");
+        let prev = dir.path().join("census.prev.dict");
+
+        write(40, "a");
+        let first = run(dir.path(), &out, 8 * 1024).unwrap();
+        assert!(!prev.exists(), "nothing to preserve on the first run");
+
+        write(40, "b");
+        let second = run(dir.path(), &out, 8 * 1024).unwrap();
+        assert_ne!(first.dict_id, second.dict_id);
+        assert_eq!(
+            codec::dict_id(&std::fs::read(&prev).unwrap()),
+            Some(first.dict_id)
+        );
+        assert_eq!(
+            codec::dict_id(&std::fs::read(&out).unwrap()),
+            Some(second.dict_id)
+        );
     }
 
     #[test]

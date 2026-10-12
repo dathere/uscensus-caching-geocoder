@@ -333,6 +333,27 @@ mod tests {
             assert!(d.iter().any(|x| x == l), "{l}");
         }
         assert!(c.default_layers("LUCA_Current").is_none());
+        // Mutually exclusive partners are both present even though a probe point sits
+        // in only one of them (ACS2017-2019 use "2010 Census"-prefixed names).
+        for (vintage, a, b) in [
+            (
+                "ACS2018_Current",
+                "2010 Census Urbanized Areas",
+                "2010 Census Urban Clusters",
+            ),
+            ("Census2010_Current", "Urbanized Areas", "Urban Clusters"),
+            (
+                "ACS2026_Current",
+                "Incorporated Places",
+                "Census Designated Places",
+            ),
+        ] {
+            let d = c.default_layers(vintage).unwrap();
+            assert!(
+                d.iter().any(|x| x == a) && d.iter().any(|x| x == b),
+                "{vintage}"
+            );
+        }
         assert_eq!(c.layer_name("Current_Current", 8), Some("Census Tracts"));
         assert!(c.layer_name("ACS2026_Current", 8).is_some());
         assert_eq!(tigerweb_suffix("Census2020_Census2020"), "Census2020");
