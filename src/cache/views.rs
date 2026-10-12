@@ -353,6 +353,12 @@ pub fn merge_batch(
     if new.status != Status::Match {
         return None;
     }
+    // Never trade a geography-complete batch view for a locations-only one, whether
+    // the entry is batch-only or a single-record entry carrying a batch view.
+    let has_geo = |e: &Entry| e.payload.batch.as_ref().is_some_and(|b| b.state.is_some());
+    if has_geo(o) && !has_geo(new) {
+        return None;
+    }
     let single = o.views.contains(Views::JSON) || o.views.contains(Views::GEO);
     if single {
         let mut merged = o.clone();
@@ -362,10 +368,6 @@ pub fn merge_batch(
             .encode(codec)
             .ok()
             .map(|env| encode_stored(&env, old.created_at));
-    }
-    let has_geo = |e: &Entry| e.payload.batch.as_ref().is_some_and(|b| b.state.is_some());
-    if has_geo(o) && !has_geo(new) {
-        return None;
     }
     encode_new()
 }
@@ -608,5 +610,39 @@ mod batch_tests {
         )
         .unwrap();
         assert!(upgraded.entry.payload.batch.unwrap().state.is_some());
+    }
+
+    #[test]
+    fn single_entry_keeps_its_geography_complete_batch_view() {
+        let codec = Codec::default();
+        let ttl_cfg = Config::default().ttl;
+        let now = SystemTime::now();
+        // A JSON-only single Match that already gained a geography-complete batch view.
+        let mut single = single_entry();
+        single.views = Views::JSON | Views::BATCH;
+        single.payload.batch = Some(BatchView {
+            matched_address: Some("A".into()),
+            state: Some("24".into()),
+            ..BatchView::default()
+        });
+        let stored = encode_stored(&single.encode(&codec).unwrap(), now);
+        let loc_only = batch_entry(
+            Status::Match,
+            BatchView {
+                matched_address: Some("A".into()),
+                ..BatchView::default()
+            },
+        );
+        assert_eq!(
+            merge_batch(
+                Some(&stored),
+                &loc_only,
+                &codec,
+                &ttl_cfg,
+                BenchmarkClass::Current,
+                now
+            ),
+            None
+        );
     }
 }

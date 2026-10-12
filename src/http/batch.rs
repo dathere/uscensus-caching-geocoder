@@ -43,6 +43,9 @@ use crate::{
     upstream::{UpstreamError, batch::BatchEndpoint, throttle::Priority},
 };
 
+/// Input widths: `id, street, city, state, zip` and `id, x, y`.
+const ADDRESS_FIELDS: usize = 5;
+const COORDINATE_FIELDS: usize = 3;
 const MSG_INVALID_BENCHMARK: &str = "Invalid benchmark in request";
 /// Unverified upstream text (PLAN.md §11.5).
 const MSG_INVALID_VINTAGE: &str = "Invalid vintage in request";
@@ -66,7 +69,8 @@ trait Row: Send + Sync + 'static {
     fn upload<'a>(rows: impl IntoIterator<Item = &'a Self>) -> Vec<u8>
     where
         Self: 'a;
-    fn parse_upstream(body: &[u8]) -> Result<Vec<UpstreamRow>, String>;
+    /// `geographies`: the upload went to the geographies endpoint (wider rows).
+    fn parse_upstream(body: &[u8], geographies: bool) -> Result<Vec<UpstreamRow>, String>;
     fn write(
         &self,
         w: &mut csv::Writer<Vec<u8>>,
@@ -93,8 +97,8 @@ impl Row for AddressRow {
     fn upload<'a>(rows: impl IntoIterator<Item = &'a Self>) -> Vec<u8> {
         upload_addresses(rows)
     }
-    fn parse_upstream(body: &[u8]) -> Result<Vec<UpstreamRow>, String> {
-        parse_upstream_addresses(body)
+    fn parse_upstream(body: &[u8], geographies: bool) -> Result<Vec<UpstreamRow>, String> {
+        parse_upstream_addresses(body, geographies)
     }
     fn write(
         &self,
@@ -122,7 +126,7 @@ impl Row for CoordRow {
     fn upload<'a>(rows: impl IntoIterator<Item = &'a Self>) -> Vec<u8> {
         upload_coordinates(rows)
     }
-    fn parse_upstream(body: &[u8]) -> Result<Vec<UpstreamRow>, String> {
+    fn parse_upstream(body: &[u8], _geographies: bool) -> Result<Vec<UpstreamRow>, String> {
         parse_upstream_coordinates(body)
     }
     fn write(
@@ -202,12 +206,13 @@ async fn parse_rows<R: Send + 'static>(
     up: &Upload,
     parse: fn(Vec<Record>) -> Result<Vec<R>, BatchInputError>,
     max_rows: usize,
+    max_fields: usize,
 ) -> Result<Vec<R>, Box<Response>> {
     let Some((name, data)) = up.file.clone() else {
         return Err(bad_request("Batch file must be specified"));
     };
     let parsed = tokio::task::spawn_blocking(move || {
-        read_records(&data, name.as_deref(), max_rows).and_then(parse)
+        read_records(&data, name.as_deref(), max_rows, max_fields).and_then(parse)
     })
     .await
     .map_err(|e| {
@@ -237,7 +242,7 @@ async fn address_batch(
         Err(r) => return *r,
     };
     let max_rows = st.settings().config.batch.max_rows;
-    let rows = match parse_rows(&up, address_rows, max_rows).await {
+    let rows = match parse_rows(&up, address_rows, max_rows, ADDRESS_FIELDS).await {
         Ok(r) => r,
         Err(r) => return *r,
     };
@@ -273,7 +278,7 @@ async fn coordinates_batch(State(st): State<SharedState>, mp: Multipart) -> Resp
         Err(r) => return *r,
     };
     let max_rows = st.settings().config.batch.max_rows;
-    let rows = match parse_rows(&up, coord_rows, max_rows).await {
+    let rows = match parse_rows(&up, coord_rows, max_rows, COORDINATE_FIELDS).await {
         Ok(r) => r,
         Err(r) => return *r,
     };
@@ -419,7 +424,8 @@ async fn run_batch<R: Row>(
             }
         };
         st.stats.record(Counter::UpstreamOk);
-        let parsed = match R::parse_upstream(&resp.body) {
+        let upstream_geo = !matches!(endpoint, BatchEndpoint::Address { geographies: false });
+        let parsed = match R::parse_upstream(&resp.body, upstream_geo) {
             Ok(p) => p,
             Err(e) => {
                 warn!(error = %e, "upstream batch output not understood");

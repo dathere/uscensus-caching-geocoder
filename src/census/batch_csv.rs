@@ -85,21 +85,24 @@ pub struct CoordRow {
 /// One input record with its 1-based record number (blank lines are not counted).
 pub type Record = (usize, Vec<String>);
 
-/// Rows of the uploaded file as strings, at most `max_records` non-blank records
-/// (reading stops with [`BatchInputError::TooMany`] at the first one past it, so an
-/// upload of millions of tiny rows is rejected without being materialized).
+/// Rows of the uploaded file as strings, at most `max_records` non-blank records of at
+/// most `max_fields` fields. Both limits are checked before a record's fields are
+/// copied out (reading stops with [`BatchInputError::TooMany`] at the first record past
+/// the row limit; over-wide records are reported as malformed), so neither millions of
+/// tiny rows nor one row with millions of fields is materialized.
 /// `.xls`/`.xlsx` need the `xlsx` feature.
 pub fn read_records(
     bytes: &[u8],
     filename: Option<&str>,
     max_records: usize,
+    max_fields: usize,
 ) -> Result<Vec<Record>, BatchInputError> {
     let is_excel = filename.is_some_and(|f| {
         let f = f.to_ascii_lowercase();
         f.ends_with(".xlsx") || f.ends_with(".xls") || f.ends_with(".xlsm") || f.ends_with(".xlsb")
     });
     if is_excel {
-        return read_excel(bytes, max_records);
+        return read_excel(bytes, max_records, max_fields);
     }
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(false)
@@ -120,6 +123,10 @@ pub fn read_records(
                 if i > max_records {
                     return Err(BatchInputError::TooMany(max_records));
                 }
+                if rec.len() > max_fields {
+                    bad.push(i);
+                    continue;
+                }
                 out.push((i, rec.iter().map(str::to_owned).collect()));
             }
             Err(_) => {
@@ -139,7 +146,11 @@ pub fn read_records(
 }
 
 #[cfg(feature = "xlsx")]
-fn read_excel(bytes: &[u8], max_records: usize) -> Result<Vec<Record>, BatchInputError> {
+fn read_excel(
+    bytes: &[u8],
+    max_records: usize,
+    max_fields: usize,
+) -> Result<Vec<Record>, BatchInputError> {
     use calamine::{Data, Reader, open_workbook_auto_from_rs};
     let mut wb = open_workbook_auto_from_rs(std::io::Cursor::new(bytes.to_vec()))
         .map_err(|e| BatchInputError::Unreadable(e.to_string()))?;
@@ -147,6 +158,9 @@ fn read_excel(bytes: &[u8], max_records: usize) -> Result<Vec<Record>, BatchInpu
         .worksheet_range_at(0)
         .ok_or_else(|| BatchInputError::Unreadable("workbook has no sheets".into()))?
         .map_err(|e| BatchInputError::Unreadable(e.to_string()))?;
+    if range.width() > max_fields {
+        return Err(BatchInputError::Malformed(vec![1]));
+    }
     let mut out = Vec::new();
     for row in range.rows() {
         let cells: Vec<String> = row
@@ -169,7 +183,11 @@ fn read_excel(bytes: &[u8], max_records: usize) -> Result<Vec<Record>, BatchInpu
 }
 
 #[cfg(not(feature = "xlsx"))]
-fn read_excel(_bytes: &[u8], _max_records: usize) -> Result<Vec<Record>, BatchInputError> {
+fn read_excel(
+    _bytes: &[u8],
+    _max_records: usize,
+    _max_fields: usize,
+) -> Result<Vec<Record>, BatchInputError> {
     Err(BatchInputError::Unreadable(
         "Excel files are not supported by this build (enable the `xlsx` feature)".into(),
     ))
@@ -301,10 +319,15 @@ fn field(r: &csv::StringRecord, i: usize) -> Option<String> {
     r.get(i).map(str::to_owned)
 }
 
-/// Parse an `addressbatch` result. Any non-blank record that is not a result row
-/// (bad id, unknown status, Match without coordinates) fails the whole body: an
-/// error page or garbled output must never turn into No_Match answers.
-pub fn parse_upstream_addresses(body: &[u8]) -> Result<Vec<UpstreamRow>, String> {
+/// Parse an `addressbatch` result. Any non-blank record that is not a complete result
+/// row (bad id, unknown status, a Match without all 8 columns, or 12 for
+/// `geographies`) fails the whole body: an error page or truncated output must never
+/// turn into answers.
+pub fn parse_upstream_addresses(
+    body: &[u8],
+    geographies: bool,
+) -> Result<Vec<UpstreamRow>, String> {
+    let match_width = if geographies { 12 } else { 8 };
     upstream_records(body)?
         .into_iter()
         .map(|(n, r)| {
@@ -315,6 +338,9 @@ pub fn parse_upstream_addresses(body: &[u8]) -> Result<Vec<UpstreamRow>, String>
                 .ok_or_else(bad)?;
             let status = r.get(2).and_then(status_of).ok_or_else(bad)?;
             let view = if status == Status::Match {
+                if r.len() != match_width || r.iter().skip(4).any(|f| f.trim().is_empty()) {
+                    return Err(bad());
+                }
                 let (lon, lat) = r.get(5).and_then(|s| s.split_once(',')).ok_or_else(bad)?;
                 BatchView {
                     match_type: field(&r, 3),
@@ -336,7 +362,7 @@ pub fn parse_upstream_addresses(body: &[u8]) -> Result<Vec<UpstreamRow>, String>
         .collect()
 }
 
-/// Parse a `coordinatesbatch` result (same strictness as addresses).
+/// Parse a `coordinatesbatch` result (same strictness; a Match needs all 8 columns).
 pub fn parse_upstream_coordinates(body: &[u8]) -> Result<Vec<UpstreamRow>, String> {
     upstream_records(body)?
         .into_iter()
@@ -348,6 +374,9 @@ pub fn parse_upstream_coordinates(body: &[u8]) -> Result<Vec<UpstreamRow>, Strin
                 .ok_or_else(bad)?;
             let status = r.get(3).and_then(status_of).ok_or_else(bad)?;
             let view = if status == Status::Match {
+                if r.len() != 8 || r.iter().skip(4).any(|f| f.trim().is_empty()) {
+                    return Err(bad());
+                }
                 BatchView {
                     state: field(&r, 4),
                     county: field(&r, 5),
@@ -554,13 +583,13 @@ mod tests {
     #[test]
     fn round_trips_captured_batches_byte_for_byte() {
         let rows = address_rows(
-            read_records(&fixture("batch_in.csv"), Some("batch_in.csv"), 10_000).unwrap(),
+            read_records(&fixture("batch_in.csv"), Some("batch_in.csv"), 10_000, 5).unwrap(),
         )
         .unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].echo(), "zzzz nowhere, , , ");
 
-        let geo = parse_upstream_addresses(&fixture("batch_geo.csv")).unwrap();
+        let geo = parse_upstream_addresses(&fixture("batch_geo.csv"), true).unwrap();
         assert_eq!(
             render_addresses(&rows, &geo, true),
             fixture("batch_geo.csv")
@@ -570,14 +599,14 @@ mod tests {
             render_addresses(&rows, &geo, false),
             fixture("batch_loc.csv")
         );
-        let loc = parse_upstream_addresses(&fixture("batch_loc.csv")).unwrap();
+        let loc = parse_upstream_addresses(&fixture("batch_loc.csv"), false).unwrap();
         assert_eq!(
             render_addresses(&rows, &loc, false),
             fixture("batch_loc.csv")
         );
 
         let crows =
-            coord_rows(read_records(&fixture("coords_in.csv"), None, 10_000).unwrap()).unwrap();
+            coord_rows(read_records(&fixture("coords_in.csv"), None, 10_000, 5).unwrap()).unwrap();
         let cparsed = parse_upstream_coordinates(&fixture("batch_coords.csv")).unwrap();
         let mut w = output_writer();
         for r in &crows {
@@ -589,17 +618,22 @@ mod tests {
 
     #[test]
     fn input_validation() {
-        let recs = read_records(b"1,a,b,c,d\n\n2,a\n3,a,b,c,d,e\n", None, 10_000).unwrap();
-        assert_eq!(address_rows(recs), Err(BatchInputError::Malformed(vec![3])));
-        let recs = read_records(b"1,a\n", None, 10_000).unwrap();
+        assert_eq!(
+            read_records(b"1,a,b,c,d\n\n2,a\n3,a,b,c,d,e\n", None, 10_000, 5),
+            Err(BatchInputError::Malformed(vec![3])),
+            "over-wide rows are caught while reading"
+        );
+        let recs = read_records(b"1,a,b,c,d,e\n", None, 10_000, 6).unwrap();
+        assert_eq!(address_rows(recs), Err(BatchInputError::Malformed(vec![1])));
+        let recs = read_records(b"1,a\n", None, 10_000, 5).unwrap();
         let rows = address_rows(recs).unwrap();
         assert_eq!((rows[0].street.as_str(), rows[0].zip.as_str()), ("a", ""));
-        let recs = read_records(b"1,1,2\n2,x,3\n3,1\n4,inf,1\n", None, 10_000).unwrap();
+        let recs = read_records(b"1,1,2\n2,x,3\n3,1\n4,inf,1\n", None, 10_000, 5).unwrap();
         assert_eq!(
             coord_rows(recs),
             Err(BatchInputError::Malformed(vec![2, 3, 4]))
         );
-        let rows = address_rows(read_records(b"a,1\n\nb,2\n", None, 10_000).unwrap()).unwrap();
+        let rows = address_rows(read_records(b"a,1\n\nb,2\n", None, 10_000, 5).unwrap()).unwrap();
         assert_eq!(
             rows.iter().map(|r| r.idx).collect::<Vec<_>>(),
             [1, 2],
@@ -616,11 +650,11 @@ mod tests {
     fn record_limit_is_enforced_while_reading() {
         let huge = "1\n".repeat(100_000);
         assert_eq!(
-            read_records(huge.as_bytes(), None, 10_000),
+            read_records(huge.as_bytes(), None, 10_000, 5),
             Err(BatchInputError::TooMany(10_000))
         );
         assert_eq!(
-            read_records(b"1\n\n\n2\n", None, 2).unwrap().len(),
+            read_records(b"1\n\n\n2\n", None, 2, 5).unwrap().len(),
             2,
             "blank lines do not count"
         );
@@ -631,23 +665,49 @@ mod tests {
     }
 
     #[test]
+    fn wide_records_are_rejected_before_materializing() {
+        let wide = format!("1{}\n", ",".repeat(1_000_000));
+        assert_eq!(
+            read_records(wide.as_bytes(), None, 10_000, 5),
+            Err(BatchInputError::Malformed(vec![1]))
+        );
+    }
+
+    #[test]
     fn upstream_output_is_parsed_strictly() {
         assert!(
-            parse_upstream_addresses(b"<html><body>Service Unavailable</body></html>").is_err()
+            parse_upstream_addresses(b"<html><body>Service Unavailable</body></html>", false)
+                .is_err()
         );
-        assert!(parse_upstream_addresses(b"\"1\",\"x\",\"Maybe\"\n").is_err());
+        assert!(parse_upstream_addresses(b"\"1\",\"x\",\"Maybe\"\n", false).is_err());
         assert!(
-            parse_upstream_addresses(b"\"1\",\"x\",\"Match\",\"Exact\",\"A\"\n").is_err(),
+            parse_upstream_addresses(b"\"1\",\"x\",\"Match\",\"Exact\",\"A\"\n", false).is_err(),
             "Match needs lon,lat"
         );
         assert!(parse_upstream_coordinates(b"\"a\",\"1\",\"2\",\"Match\"\n").is_err());
-        assert_eq!(parse_upstream_addresses(b"\n\n").unwrap(), vec![]);
+        assert_eq!(parse_upstream_addresses(b"\n\n", false).unwrap(), vec![]);
+        // Truncated Match rows are rejected for each endpoint.
+        let geo_row = String::from_utf8(fixture("batch_geo.csv"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        let truncated = geo_row.rsplit_once(',').unwrap().0.to_owned();
+        assert!(parse_upstream_addresses(geo_row.as_bytes(), true).is_ok());
+        assert!(parse_upstream_addresses(truncated.as_bytes(), true).is_err());
+        assert!(
+            parse_upstream_addresses(geo_row.as_bytes(), false).is_err(),
+            "width must match the endpoint"
+        );
+        assert!(parse_upstream_coordinates(br#""1","-76.92744","38.84601","Match","24""#).is_err());
+        assert!(parse_upstream_coordinates(br#""1","-76.92744","38.84601","No_Match""#).is_ok());
     }
 
     #[test]
     fn excel_without_feature_or_garbage_is_unreadable() {
         assert!(matches!(
-            read_records(b"not a workbook", Some("x.XLSX"), 10_000),
+            read_records(b"not a workbook", Some("x.XLSX"), 10_000, 5),
             Err(BatchInputError::Unreadable(_))
         ));
     }
@@ -655,7 +715,7 @@ mod tests {
     #[test]
     fn upload_uses_row_numbers_as_ids() {
         let rows =
-            address_rows(read_records(&fixture("batch_in.csv"), None, 10_000).unwrap()).unwrap();
+            address_rows(read_records(&fixture("batch_in.csv"), None, 10_000, 5).unwrap()).unwrap();
         assert_eq!(
             upload_addresses(&rows),
             b"1,4600 Silver Hill Rd,Washington,DC,20233\n2,zzzz nowhere,,,\n3,1600 Pennsylvania Ave NW,Washington,DC,20500\n"
@@ -670,9 +730,9 @@ mod tests {
             .json
             .unwrap();
         let rows =
-            address_rows(read_records(&fixture("batch_in.csv"), None, 10_000).unwrap()).unwrap();
+            address_rows(read_records(&fixture("batch_in.csv"), None, 10_000, 5).unwrap()).unwrap();
         let v = heuristic_from_matches(&json, &rows[0].echo(), true).unwrap();
-        let expected = &parse_upstream_addresses(&fixture("batch_geo.csv")).unwrap()[0].view;
+        let expected = &parse_upstream_addresses(&fixture("batch_geo.csv"), true).unwrap()[0].view;
         assert_eq!(&v, expected);
 
         let without_zip = "4600 Silver Hill Rd, Washington, DC, ";

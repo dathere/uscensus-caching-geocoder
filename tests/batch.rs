@@ -552,3 +552,40 @@ async fn coordinates_batch_no_match_keeps_single_coordinates_entry() {
         "single coordinates entry survived"
     );
 }
+
+#[tokio::test]
+async fn truncated_upstream_match_rows_are_rejected() {
+    let h = harness(|_| {}).await;
+    mock_post(
+        &h,
+        "/geographies/coordinatesbatch",
+        br#""1","-76.92744","38.84601","Match","24""#.to_vec(),
+    )
+    .await;
+    let (status, _, _) = post(
+        &h,
+        COORDS,
+        "coordinatesFile",
+        b"1,-76.92744,38.84601\n",
+        &[("benchmark", "4"), ("vintage", "4")],
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert_eq!(h.state.store.entry_count().unwrap(), 0, "nothing cached");
+}
+
+#[tokio::test]
+async fn one_extremely_wide_row_is_rejected() {
+    let h = harness(|_| {}).await;
+    let wide = format!("1{}\n", ",".repeat(2_000_000));
+    let (status, _, body) = post(
+        &h,
+        ADDR_LOC,
+        "addressFile",
+        wide.as_bytes(),
+        &[("benchmark", "4")],
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(json(&body)["errors"][0], "Malformed rows: 1");
+}
