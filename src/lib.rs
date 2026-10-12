@@ -10,6 +10,7 @@ pub mod dict;
 pub mod error;
 pub mod http;
 pub mod jobs;
+pub mod offline;
 pub mod state;
 pub mod store;
 pub mod telemetry;

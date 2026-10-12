@@ -53,6 +53,60 @@ pub fn result_status(r: &RowResult) -> crate::cache::envelope::Status {
     }
 }
 
+/// Parse a job file (`search`: `address`, `onelineaddress` or `coordinates`) into job
+/// inputs; `.xls`/`.xlsx` by file name with the `xlsx` feature. Blocking.
+pub fn inputs_from_file(
+    data: &[u8],
+    filename: Option<&str>,
+    search: &str,
+) -> Result<Vec<(String, RowInput)>, String> {
+    use crate::{
+        census::batch_csv::{address_rows, coord_rows, oneline_rows, read_records},
+        http::batch::{ADDRESS_FIELDS, COORDINATE_FIELDS, ONELINE_FIELDS},
+    };
+    let read = |width| read_records(data, filename, usize::MAX, width).map_err(|e| e.to_string());
+    let inputs: Vec<(String, RowInput)> = match search {
+        "address" => address_rows(read(ADDRESS_FIELDS)?)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| {
+                (
+                    r.user_id,
+                    RowInput::Address {
+                        street: r.street,
+                        city: r.city,
+                        state: r.state,
+                        zip: r.zip,
+                    },
+                )
+            })
+            .collect(),
+        "onelineaddress" => oneline_rows(read(ONELINE_FIELDS)?)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| (r.user_id, RowInput::Oneline { address: r.address }))
+            .collect(),
+        "coordinates" => coord_rows(read(COORDINATE_FIELDS)?)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| {
+                (
+                    r.user_id,
+                    RowInput::Coord {
+                        x: r.x_raw,
+                        y: r.y_raw,
+                    },
+                )
+            })
+            .collect(),
+        _ => return Err("searchtype must be address, onelineaddress or coordinates".into()),
+    };
+    if inputs.is_empty() {
+        return Err("Batch file contains no records".into());
+    }
+    Ok(inputs)
+}
+
 /// Key `(user id, input)` rows. All rows must share one search type (the job's), and
 /// coordinates must be numbers and need `geographies`.
 pub fn build_rows(

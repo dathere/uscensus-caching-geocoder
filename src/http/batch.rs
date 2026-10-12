@@ -24,7 +24,7 @@ use crate::{
         key::CacheKey,
         views::{BatchLookup, BatchNeed},
     },
-    catalog::{Benchmark, Vintage},
+    catalog::{Benchmark, Catalog, Vintage},
     census::{
         batch_csv::{BatchInputError, Record, RowResult, address_rows, coord_rows, read_records},
         params::{MSG_NO_BENCHMARK, MSG_NO_VINTAGE},
@@ -112,21 +112,31 @@ pub(crate) fn resolve(
     vintage: Option<&str>,
     rt: ReturnType,
 ) -> Result<(Benchmark, Vintage), Box<Response>> {
+    resolve_target(&st.catalog.load(), benchmark, vintage, rt).map_err(bad_request)
+}
+
+/// Resolve benchmark/vintage aliases; `locations` uses the benchmark's default vintage.
+/// Errors are the Census-style messages.
+pub fn resolve_target(
+    catalog: &Catalog,
+    benchmark: Option<&str>,
+    vintage: Option<&str>,
+    rt: ReturnType,
+) -> Result<(Benchmark, Vintage), &'static str> {
     let Some(b) = benchmark.filter(|b| !b.is_empty()) else {
-        return Err(bad_request(MSG_NO_BENCHMARK));
+        return Err(MSG_NO_BENCHMARK);
     };
-    let catalog = st.catalog.load();
     let bench = catalog
         .resolve_benchmark(b)
         .cloned()
-        .ok_or_else(|| bad_request(MSG_INVALID_BENCHMARK))?;
+        .ok_or(MSG_INVALID_BENCHMARK)?;
     let vintage = match (rt, vintage.filter(|v| !v.is_empty())) {
-        (ReturnType::Geographies, None) => return Err(bad_request(MSG_NO_VINTAGE)),
+        (ReturnType::Geographies, None) => return Err(MSG_NO_VINTAGE),
         (ReturnType::Geographies, Some(v)) => catalog.resolve_vintage(bench.id, v),
         (ReturnType::Locations, _) => catalog.default_vintage(bench.id),
     }
     .cloned()
-    .ok_or_else(|| bad_request(MSG_INVALID_VINTAGE))?;
+    .ok_or(MSG_INVALID_VINTAGE)?;
     Ok((bench, vintage))
 }
 

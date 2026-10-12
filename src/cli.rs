@@ -71,6 +71,80 @@ pub enum Command {
         #[arg(long, default_value_t = crate::dict::train::DEFAULT_MAX_SIZE)]
         max_size: usize,
     },
+    /// Cache statistics (offline; the server must be stopped)
+    Stats {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+        /// Also scan every entry header (counts by status/searchtype/benchmark, compression)
+        #[arg(long)]
+        full: bool,
+    },
+    /// Delete cache entries by scope (offline)
+    Purge {
+        /// all | expired | benchmark | vintage | status | prefix
+        #[arg(long)]
+        scope: String,
+        /// benchmark: id or name; vintage: `benchmark:vintage`; status: Match/NoMatch/Tie;
+        /// prefix: the key prefix (matched exactly)
+        #[arg(long)]
+        value: Option<String>,
+        /// Only count what would be deleted
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Export cache entries as JSON lines (offline)
+    Export {
+        /// Only keys starting with this prefix
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Output file (`-` for stdout)
+        #[arg(short, long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Restore exported JSON lines, or queue a CSV as a cache-warming job (offline)
+    Import {
+        /// `.jsonl` export, or a `.csv`/`.xlsx` batch file
+        file: PathBuf,
+        /// jsonl or csv (default: from the file extension)
+        #[arg(long)]
+        format: Option<String>,
+        /// csv: locations | geographies
+        #[arg(long, default_value = "locations")]
+        returntype: String,
+        /// csv: benchmark id or name
+        #[arg(long)]
+        benchmark: Option<String>,
+        /// csv: vintage id or name (required for geographies)
+        #[arg(long)]
+        vintage: Option<String>,
+        /// csv: address | onelineaddress | coordinates
+        #[arg(long, default_value = "address")]
+        searchtype: String,
+    },
+    /// Reclaim free space in the database file (offline)
+    Compact,
+    /// Show or refresh the benchmark/vintage catalog (offline)
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CatalogAction {
+    /// Print the catalog in effect
+    Show {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch benchmarks and vintages from upstream into the store, then print them
+    Refresh {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn parse_key_value(s: &str) -> Result<(String, String), String> {
@@ -150,6 +224,62 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             let report = crate::dict::train::run(&samples, &output, max_size)?;
             println!("{report}\nwrote {}", output.display());
             Ok(())
+        }
+        offline => {
+            telemetry::init_stderr(&settings.config.log)?;
+            run_offline(settings, offline)
+        }
+    }
+}
+
+fn run_offline(settings: Settings, command: Command) -> anyhow::Result<()> {
+    use crate::offline;
+    match command {
+        Command::Stats { json, full } => offline::stats(settings, json, full),
+        Command::Purge {
+            scope,
+            value,
+            dry_run,
+        } => offline::purge_cmd(settings, &scope, value.as_deref(), dry_run),
+        Command::Export { prefix, output } => offline::export(settings, &prefix, &output),
+        Command::Import {
+            file,
+            format,
+            returntype,
+            benchmark,
+            vintage,
+            searchtype,
+        } => {
+            let format = format.unwrap_or_else(|| {
+                let ext = file
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if ["csv", "xls", "xlsx", "xlsm", "xlsb"].contains(&ext.as_str()) {
+                    "csv".into()
+                } else {
+                    "jsonl".into()
+                }
+            });
+            let csv = match format.as_str() {
+                "jsonl" => None,
+                "csv" => Some(offline::CsvImport {
+                    returntype,
+                    benchmark,
+                    vintage,
+                    searchtype,
+                }),
+                other => anyhow::bail!("unknown import format `{other}` (jsonl or csv)"),
+            };
+            offline::import(settings, &file, csv)
+        }
+        Command::Compact => offline::compact_cmd(settings),
+        Command::Catalog { action } => match action {
+            CatalogAction::Show { json } => offline::catalog(settings, false, json),
+            CatalogAction::Refresh { json } => offline::catalog(settings, true, json),
+        },
+        Command::Serve | Command::CheckConfig { .. } | Command::TrainDict { .. } => {
+            unreachable!("handled by run")
         }
     }
 }

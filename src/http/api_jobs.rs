@@ -12,16 +12,10 @@ use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::batch::{
-    ADDRESS_FIELDS, COORDINATE_FIELDS, ONELINE_FIELDS, Upload, bad_request, parse_rows,
-    read_upload, resolve,
-};
+use super::batch::{Upload, bad_request, read_upload, resolve};
 use crate::{
     batch::unix_now,
-    census::{
-        batch_csv::{address_rows, coord_rows, oneline_rows},
-        types::ReturnType,
-    },
+    census::types::ReturnType,
     error::AppError,
     jobs::{
         Counts, JobKind, JobRecord, JobState, RowInput,
@@ -307,46 +301,18 @@ pub(crate) async fn inputs_from_upload(
     up: &Upload,
     search: &str,
 ) -> Result<Vec<(String, RowInput)>, Box<Response>> {
-    Ok(match search {
-        "address" => parse_rows(up, address_rows, usize::MAX, ADDRESS_FIELDS)
-            .await?
-            .into_iter()
-            .map(|r| {
-                (
-                    r.user_id,
-                    RowInput::Address {
-                        street: r.street,
-                        city: r.city,
-                        state: r.state,
-                        zip: r.zip,
-                    },
-                )
-            })
-            .collect(),
-        "onelineaddress" => parse_rows(up, oneline_rows, usize::MAX, ONELINE_FIELDS)
-            .await?
-            .into_iter()
-            .map(|r| (r.user_id, RowInput::Oneline { address: r.address }))
-            .collect(),
-        "coordinates" => parse_rows(up, coord_rows, usize::MAX, COORDINATE_FIELDS)
-            .await?
-            .into_iter()
-            .map(|r| {
-                (
-                    r.user_id,
-                    RowInput::Coord {
-                        x: r.x_raw,
-                        y: r.y_raw,
-                    },
-                )
-            })
-            .collect(),
-        _ => {
-            return Err(bad_request(
-                "searchtype must be address, onelineaddress or coordinates",
-            ));
-        }
-    })
+    let Some((_, name, data)) = up.file.clone() else {
+        return Err(bad_request("Batch file must be specified"));
+    };
+    let search = search.to_owned();
+    tokio::task::spawn_blocking(move || submit::inputs_from_file(&data, name.as_deref(), &search))
+        .await
+        .map_err(|e| {
+            Box::new(
+                AppError::Internal(anyhow::anyhow!("job file parse task: {e}")).into_response(),
+            )
+        })?
+        .map_err(bad_request)
 }
 
 fn from_json(st: &SharedState, body: SubmitJson) -> Prepared {

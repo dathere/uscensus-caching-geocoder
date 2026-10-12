@@ -1,9 +1,9 @@
 //! `/api/v1/cache/*` (PLAN.md §8): stats, entry listing/inspection, purge, export,
-//! import and compaction. Logic lives in `cache::maintenance` and the store; these are
-//! thin handlers.
+//! import and compaction. Logic lives in `cache::admin`, `cache::maintenance` and the
+//! store (shared with the offline CLI); these are thin handlers.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -26,13 +26,14 @@ use super::{
 };
 use crate::{
     cache::{
-        envelope::{BatchView, EntrySource, HEADER_LEN, Header, Status, Views, decode_stored},
-        key::{CacheKey, KEY_VERSION, SearchType},
-        maintenance::{
-            PurgeCtx, PurgeScope, export_record, import_keeps_existing, parse_import, purge,
+        admin::{
+            self, CacheStats, CompactResponse, cache_stats, export_pages, parse_scope,
+            parse_status, purge_context, store_imported,
         },
+        envelope::{BatchView, EntrySource, Header, Status, Views, decode_stored},
+        key::{CacheKey, KEY_VERSION, SearchType},
+        maintenance::{export_record, parse_import, purge},
         policy::{Freshness, freshness, ttl},
-        views::decode,
     },
     census::types::ReturnType,
     error::AppError,
@@ -41,7 +42,6 @@ use crate::{
         submit::{self, JobSpec, SubmitError},
     },
     state::SharedState,
-    store::stats::Counter,
 };
 
 pub const TAG: &str = "cache";
@@ -77,19 +77,6 @@ fn view_names(v: Views) -> Vec<String> {
     .collect()
 }
 
-fn purge_ctx(st: &SharedState) -> PurgeCtx {
-    let catalog = st.catalog.load();
-    PurgeCtx {
-        ttl: st.settings().config.ttl.clone(),
-        classes: catalog
-            .benchmarks()
-            .iter()
-            .map(|b| (b.id, catalog.class(b.id)))
-            .collect(),
-        now: SystemTime::now(),
-    }
-}
-
 // -------------------------------------------------------------------- stats
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -98,117 +85,6 @@ pub struct StatsQuery {
     /// `full`: also scan every entry header for per-status/searchtype/benchmark counts
     /// and sample the compression ratio (slower; the default is cheap enough to poll).
     pub detail: Option<String>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TableStatsView {
-    pub tree_height: u32,
-    pub leaf_pages: u64,
-    pub branch_pages: u64,
-    pub stored_bytes: u64,
-    pub metadata_bytes: u64,
-    pub fragmented_bytes: u64,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CompressionSample {
-    /// Entries decoded for the sample (the first ones in key order).
-    pub sampled: u64,
-    /// Stored envelope bytes of the sample.
-    pub stored_bytes: u64,
-    /// The same entries uncompressed (header + rmp payload).
-    pub raw_bytes: u64,
-    /// `raw_bytes / stored_bytes`.
-    pub ratio: f64,
-}
-
-#[derive(Debug, Default, Serialize, ToSchema)]
-pub struct StatsDetail {
-    pub by_status: BTreeMap<String, u64>,
-    pub by_searchtype: BTreeMap<String, u64>,
-    pub by_benchmark: BTreeMap<String, u64>,
-    /// Entries whose header cannot be read.
-    pub undecodable: u64,
-    pub compression: Option<CompressionSample>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CacheStats {
-    pub entries: u64,
-    pub file_bytes: u64,
-    pub retry_queue_len: u64,
-    /// `hits`, `misses`, `stale_hits`, `upstream_ok`, `upstream_err` (stored + unflushed).
-    pub counters: BTreeMap<String, u64>,
-    /// `hits / (hits + misses)`, when any request was counted.
-    pub hit_ratio: Option<f64>,
-    /// Jobs by state.
-    pub jobs: BTreeMap<String, u64>,
-    pub entries_table: TableStatsView,
-    pub detail: Option<StatsDetail>,
-}
-
-const SAMPLE: u64 = 1000;
-const PAGE: usize = 2000;
-
-/// Header-only scan in short read transactions (one page each).
-fn stats_detail(st: &SharedState) -> anyhow::Result<StatsDetail> {
-    let mut d = StatsDetail::default();
-    let (mut sampled, mut stored, mut raw) = (0u64, 0u64, 0u64);
-    let mut after: Option<String> = None;
-    loop {
-        let page = st.store.scan_entries("", after.as_deref(), PAGE)?;
-        let Some((last, _)) = page.last() else {
-            break;
-        };
-        after = Some(last.clone());
-        for (key, bytes) in &page {
-            if let Ok(k) = CacheKey::parse(key) {
-                *d.by_searchtype
-                    .entry(k.search_type.as_str().into())
-                    .or_default() += 1;
-                *d.by_benchmark
-                    .entry(k.benchmark_id.to_string())
-                    .or_default() += 1;
-            }
-            let Ok((envelope, _)) = decode_stored(bytes) else {
-                d.undecodable += 1;
-                continue;
-            };
-            let Ok(h) = Header::parse(&envelope) else {
-                d.undecodable += 1;
-                continue;
-            };
-            let status = serde_json::to_value(h.status)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_default();
-            *d.by_status.entry(status).or_default() += 1;
-            if sampled < SAMPLE
-                && let Ok(s) = decode(bytes, st.codec)
-                && let Ok(payload) = rmp_serde::to_vec_named(&s.entry.payload)
-            {
-                sampled += 1;
-                stored += envelope.len() as u64;
-                raw += (HEADER_LEN + payload.len()) as u64;
-            }
-        }
-        if page.len() < PAGE {
-            break;
-        }
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let ratio = if stored == 0 {
-        0.0
-    } else {
-        raw as f64 / stored as f64
-    };
-    d.compression = (sampled > 0).then_some(CompressionSample {
-        sampled,
-        stored_bytes: stored,
-        raw_bytes: raw,
-        ratio,
-    });
-    Ok(d)
 }
 
 /// Entry counts, file size, hit ratio, retry queue, jobs and redb table statistics.
@@ -222,48 +98,7 @@ fn stats_detail(st: &SharedState) -> anyhow::Result<StatsDetail> {
 async fn stats(State(st): State<SharedState>, Query(q): Query<StatsQuery>) -> Response {
     let full = q.detail.as_deref() == Some("full");
     let st2 = st.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<CacheStats> {
-        let st = st2;
-        let totals = st.store.stat_totals()?;
-        let counters: BTreeMap<String, u64> = Counter::ALL
-            .iter()
-            .map(|c| {
-                let stored = totals.get(c.name()).copied().unwrap_or(0);
-                (c.name().to_owned(), stored + st.stats.pending(*c))
-            })
-            .collect();
-        let (hits, misses) = (counters["hits"], counters["misses"]);
-        #[allow(clippy::cast_precision_loss)]
-        let hit_ratio = (hits + misses > 0).then(|| hits as f64 / (hits + misses) as f64);
-        let mut jobs: BTreeMap<String, u64> = BTreeMap::new();
-        for j in st.store.job_list()? {
-            let name = serde_json::to_value(j.state)?
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            *jobs.entry(name).or_default() += 1;
-        }
-        let t = st.store.entries_table_stats()?;
-        Ok(CacheStats {
-            entries: st.store.entry_count()?,
-            file_bytes: st.store.file_size()?,
-            retry_queue_len: st.store.retry_len()?,
-            counters,
-            hit_ratio,
-            jobs,
-            entries_table: TableStatsView {
-                tree_height: t.tree_height(),
-                leaf_pages: t.leaf_pages(),
-                branch_pages: t.branch_pages(),
-                stored_bytes: t.stored_bytes(),
-                metadata_bytes: t.metadata_bytes(),
-                fragmented_bytes: t.fragmented_bytes(),
-            },
-            detail: if full { Some(stats_detail(&st)?) } else { None },
-        })
-    })
-    .await;
-    match result {
+    match tokio::task::spawn_blocking(move || cache_stats(&st2, full)).await {
         Ok(Ok(s)) => Json(s).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(anyhow::anyhow!("stats task: {e}")),
@@ -310,15 +145,6 @@ pub struct EntryPage {
     /// Pass back as `cursor`; absent at the end. It is the last key *examined*, so
     /// filtered pages may be short (even empty) while it still advances.
     pub next_cursor: Option<String>,
-}
-
-fn parse_status(s: &str) -> Option<Status> {
-    match s.to_ascii_lowercase().replace('_', "").as_str() {
-        "match" => Some(Status::Match),
-        "nomatch" => Some(Status::NoMatch),
-        "tie" => Some(Status::Tie),
-        _ => None,
-    }
 }
 
 fn summary(st: &SharedState, key: &str, bytes: &[u8]) -> Option<EntrySummary> {
@@ -506,51 +332,6 @@ pub struct PurgeResponse {
     pub matched: u64,
 }
 
-fn purge_scope(st: &SharedState, req: &PurgeRequest) -> Result<PurgeScope, String> {
-    // A prefix is matched exactly (trailing spaces are part of it); other values are
-    // identifiers.
-    let value = if req.scope == "prefix" {
-        req.value.as_deref().filter(|v| !v.is_empty())
-    } else {
-        req.value
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-    };
-    let need = || value.ok_or_else(|| format!("scope `{}` needs a value", req.scope));
-    let catalog = st.catalog.load();
-    let bench = |b: &str| {
-        catalog
-            .resolve_benchmark(b)
-            .map(|b| b.id)
-            .ok_or_else(|| format!("unknown benchmark `{b}`"))
-    };
-    Ok(match req.scope.as_str() {
-        "all" => PurgeScope::All,
-        "expired" => PurgeScope::Expired,
-        "benchmark" => PurgeScope::Benchmark(bench(need()?)?),
-        "vintage" => {
-            let (b, v) = need()?
-                .split_once(':')
-                .ok_or("vintage value must be `benchmark:vintage`")?;
-            let benchmark_id = bench(b)?;
-            let vintage_id = catalog
-                .resolve_vintage(benchmark_id, v)
-                .map(|v| v.id)
-                .ok_or_else(|| format!("unknown vintage `{v}` for benchmark {benchmark_id}"))?;
-            PurgeScope::Vintage {
-                benchmark_id,
-                vintage_id,
-            }
-        }
-        "status" => {
-            PurgeScope::Status(parse_status(need()?).ok_or("status must be Match, NoMatch or Tie")?)
-        }
-        "prefix" => PurgeScope::Prefix(need()?.to_owned()),
-        other => return Err(format!("unknown scope `{other}`")),
-    })
-}
-
 /// Delete (or with `dry_run`, count) entries by scope. Per-entry hit counters and retry
 /// queue items of purged keys are left in place (a refresh settles a missing entry).
 #[utoipa::path(
@@ -561,11 +342,11 @@ fn purge_scope(st: &SharedState, req: &PurgeRequest) -> Result<PurgeScope, Strin
     responses((status = 200, body = PurgeResponse), (status = 400, description = "Bad scope or value"))
 )]
 async fn purge_entries(State(st): State<SharedState>, Json(req): Json<PurgeRequest>) -> Response {
-    let scope = match purge_scope(&st, &req) {
+    let scope = match parse_scope(&st.catalog.load(), &req.scope, req.value.as_deref()) {
         Ok(s) => s,
         Err(msg) => return AppError::BadRequest(msg).into_response(),
     };
-    match purge(&st.store, scope, purge_ctx(&st), req.dry_run).await {
+    match purge(&st.store, scope, purge_context(&st), req.dry_run).await {
         Ok(matched) => Json(PurgeResponse {
             scope: req.scope,
             dry_run: req.dry_run,
@@ -585,8 +366,6 @@ pub struct ExportQuery {
     pub prefix: Option<String>,
 }
 
-const EXPORT_PAGE: usize = 500;
-
 /// Stream entries as JSON lines (decoded; importable into any build).
 #[utoipa::path(
     get,
@@ -599,37 +378,14 @@ async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> 
     let prefix = q.prefix.unwrap_or_default();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
     let (store, codec) = (st.store.clone(), st.codec);
-    // Short read transactions, one page each, so a long export never blocks compaction.
     tokio::task::spawn_blocking(move || {
-        let mut after: Option<String> = None;
-        loop {
-            let page = match store.scan_entries(&prefix, after.as_deref(), EXPORT_PAGE) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(error = %e, "export aborted");
-                    // Fail the body so the client sees a truncated download.
-                    let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
-                    return;
-                }
-            };
-            let mut chunk = Vec::new();
-            for (k, v) in &page {
-                match export_record(k, v, codec) {
-                    Ok(rec) => {
-                        if serde_json::to_writer(&mut chunk, &rec).is_ok() {
-                            chunk.push(b'\n');
-                        }
-                    }
-                    Err(e) => warn!(key = %k, error = %e, "export: skipping undecodable entry"),
-                }
-            }
-            if !chunk.is_empty() && tx.blocking_send(Ok(Bytes::from(chunk))).is_err() {
-                return; // client went away
-            }
-            match page.last() {
-                Some((k, _)) if page.len() == EXPORT_PAGE => after = Some(k.clone()),
-                _ => return,
-            }
+        let sent = export_pages(&store, codec, &prefix, |chunk| {
+            tx.blocking_send(Ok(Bytes::from(chunk))).is_ok() // false: client went away
+        });
+        if let Err(e) = sent {
+            warn!(error = %e, "export aborted");
+            // Fail the body so the client sees a truncated download.
+            let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -709,8 +465,6 @@ async fn import(
     }
 }
 
-const IMPORT_BATCH: usize = 1000;
-
 async fn import_jsonl(st: SharedState, body: Bytes) -> Response {
     let codec = st.codec;
     let parsed = tokio::task::spawn_blocking(move || parse_import(&body, codec, 50)).await;
@@ -726,37 +480,9 @@ async fn import_jsonl(st: SharedState, body: Bytes) -> Response {
             .map(|(line, error)| ImportError { line, error })
             .collect(),
     );
-    let items = parsed.records;
-    let records = items.len() as u64;
-    let due = unix(SystemTime::now()) + st.settings().config.retry.negative_delay.as_secs();
-    let mut items = items;
-    while !items.is_empty() {
-        let rest = items.split_off(items.len().min(IMPORT_BATCH));
-        let batch = std::mem::replace(&mut items, rest);
-        // Restored batch/job NoMatch entries keep their pending re-check.
-        let retries = batch
-            .iter()
-            .filter(|i| i.needs_retry)
-            .map(|i| (i.key.clone(), due, 0))
-            .collect();
-        let batch = batch.into_iter().map(|i| (i.key, i.stored)).collect();
-        let written = st
-            .store
-            .put_entries_with(
-                batch,
-                |existing, new: &Vec<u8>| {
-                    if existing.is_some_and(|e| import_keeps_existing(e, new)) {
-                        None
-                    } else {
-                        Some(new.clone())
-                    }
-                },
-                retries,
-            )
-            .await;
-        if let Err(e) = written {
-            return internal(e);
-        }
+    let records = parsed.records.len() as u64;
+    if let Err(e) = store_imported(&st, parsed.records).await {
+        return internal(e);
     }
     Json(ImportResponse {
         format: "jsonl".into(),
@@ -817,15 +543,6 @@ async fn import_csv(st: SharedState, q: ImportQuery, body: Bytes) -> Response {
 
 // ------------------------------------------------------------------ compact
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CompactResponse {
-    /// `false`: there was nothing to reclaim.
-    pub compacted: bool,
-    pub file_bytes_before: u64,
-    pub file_bytes_after: u64,
-    pub millis: u64,
-}
-
 /// Reclaim free space (`Database::compact`). Reads and writes wait while it runs.
 #[utoipa::path(
     post,
@@ -835,19 +552,7 @@ pub struct CompactResponse {
 )]
 async fn compact(State(st): State<SharedState>) -> Response {
     let store = st.store.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<CompactResponse> {
-        let before = store.file_size()?;
-        let start = std::time::Instant::now();
-        let compacted = store.compact()?;
-        Ok(CompactResponse {
-            compacted,
-            file_bytes_before: before,
-            file_bytes_after: store.file_size()?,
-            millis: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
-        })
-    })
-    .await;
-    match result {
+    match tokio::task::spawn_blocking(move || admin::compact(&store)).await {
         Ok(Ok(r)) => Json(r).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(anyhow::anyhow!("compact task: {e}")),

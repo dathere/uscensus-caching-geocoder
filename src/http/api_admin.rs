@@ -59,7 +59,7 @@ pub struct CatalogView {
     pub benchmarks: Vec<BenchmarkView>,
 }
 
-fn catalog_view(st: &SharedState) -> CatalogView {
+pub(crate) fn catalog_view(st: &SharedState) -> CatalogView {
     let c = st.catalog.load();
     CatalogView {
         benchmarks: c

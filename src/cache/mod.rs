@@ -1,5 +1,6 @@
 //! Cache keys, entry encoding, and expiry policy.
 
+pub mod admin;
 pub mod codec;
 pub mod envelope;
 pub mod key;
