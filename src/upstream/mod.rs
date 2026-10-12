@@ -1,6 +1,7 @@
 //! Upstream Census/TIGERweb client: throttle + retry/backoff + circuit breaker.
 
 pub mod backoff;
+pub mod batch;
 pub mod catalog;
 pub mod single;
 pub mod throttle;

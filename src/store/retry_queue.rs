@@ -27,6 +27,24 @@ impl Store {
         .await
     }
 
+    /// Enqueue many `(key, due, attempts)` items in one transaction.
+    pub async fn retry_enqueue_many(
+        &self,
+        items: Vec<(String, u64, u8)>,
+    ) -> Result<(), StoreError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.write(Box::new(move |ctx| {
+            let t = ctx.retry_queue()?;
+            for (key, due, attempts) in &items {
+                t.insert((*due, key.as_str()), *attempts)?;
+            }
+            Ok(())
+        }))
+        .await
+    }
+
     /// Items due at or before `now`, oldest first.
     pub fn retry_due(&self, now: u64, limit: usize) -> Result<Vec<RetryItem>, StoreError> {
         self.read(|txn| {

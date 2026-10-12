@@ -17,15 +17,17 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Placeholder until Phase 6 wires calamine for xls/xlsx batch uploads.
-xlsx = []
+# xls/xlsx batch uploads.
+xlsx = ["dep:calamine"]
 
 [dependencies]
 anyhow = "1.0.104"
 arc-swap = "1.9.2"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 bytes = "1.12.1"
+calamine = { version = "0.36", optional = true }
 clap = { version = "4", features = ["derive", "env"] }
+csv = "1.4.0"
 fastrand = "2.5.0"
 form_urlencoded = "1.2.2"
 governor = "0.10"

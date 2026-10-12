@@ -1,5 +1,6 @@
 //! HTTP surface: router assembly and the server loop.
 
+pub mod batch;
 pub mod geocoder;
 
 use std::time::Duration;
@@ -19,9 +20,13 @@ use crate::{
 };
 
 pub fn router(state: SharedState) -> Router {
+    let max_body = usize::try_from(state.settings().config.server.max_body_mb)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(1024 * 1024);
     Router::new()
         .route("/healthz", get(healthz))
         .merge(geocoder::routes())
+        .merge(batch::routes(max_body))
         .with_state(state)
 }
 

@@ -4,10 +4,13 @@ use std::time::SystemTime;
 
 use super::{
     codec::Codec,
-    envelope::{Entry, EnvelopeError, Status, Views, decode_stored},
+    envelope::{BatchView, Entry, EnvelopeError, Status, Views, decode_stored, encode_stored},
     policy::{BenchmarkClass, Freshness, freshness, ttl},
 };
-use crate::config::Config;
+use crate::{
+    census::batch_csv::{RowResult, heuristic_from_geographies, heuristic_from_matches},
+    config::{Config, TtlConfig},
+};
 
 /// The response shape a single-record request needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,5 +214,320 @@ mod tests {
             ),
             Lookup::Corrupt
         ));
+    }
+}
+
+// ---------------------------------------------------------------- batch rows
+
+/// What a batch row needs from an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchNeed {
+    /// `locations/addressbatch` columns.
+    Locations,
+    /// `geographies/addressbatch`: also state/county/tract/block.
+    Geographies,
+    /// `geographies/coordinatesbatch`.
+    Coordinates,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchLookup {
+    /// `heuristic`: synthesized from single-record JSON (match type guessed).
+    Hit {
+        result: RowResult,
+        heuristic: bool,
+    },
+    Miss,
+}
+
+/// Can a stored entry answer one batch row? Only fresh entries count (no stale
+/// fallback for batch). `echo` is the row's `street, city, state, zip` input.
+pub fn classify_batch(
+    bytes: Option<&[u8]>,
+    codec: &Codec,
+    cfg: &Config,
+    class: BenchmarkClass,
+    need: BatchNeed,
+    now: SystemTime,
+    echo: &str,
+) -> BatchLookup {
+    let Some(stored) = bytes.and_then(|b| decode(b, codec).ok()) else {
+        return BatchLookup::Miss;
+    };
+    let e = &stored.entry;
+    if freshness(
+        stored.created_at,
+        now,
+        ttl(&cfg.ttl, e.status, e.source, class),
+        false,
+    ) != Freshness::Fresh
+    {
+        return BatchLookup::Miss;
+    }
+    let hit = |result| BatchLookup::Hit {
+        result,
+        heuristic: false,
+    };
+
+    if e.views.contains(Views::BATCH)
+        && let Some(v) = &e.payload.batch
+    {
+        match e.status {
+            Status::NoMatch => return hit(RowResult::NoMatch),
+            Status::Tie => return hit(RowResult::Tie),
+            Status::Match => {
+                let complete = match need {
+                    BatchNeed::Locations => v.matched_address.is_some(),
+                    BatchNeed::Geographies => v.matched_address.is_some() && v.state.is_some(),
+                    BatchNeed::Coordinates => v.state.is_some(),
+                };
+                if complete {
+                    return hit(RowResult::Match(Box::new(v.clone())));
+                }
+            }
+        }
+    }
+
+    let Some(json) = e.payload.json.as_deref() else {
+        return BatchLookup::Miss;
+    };
+    let heuristic = |v: Option<BatchView>| match v {
+        Some(v) => BatchLookup::Hit {
+            result: RowResult::Match(Box::new(v)),
+            heuristic: true,
+        },
+        None => BatchLookup::Miss,
+    };
+    match (need, e.status) {
+        (BatchNeed::Coordinates, Status::NoMatch) if e.views.contains(Views::GEO) => {
+            hit(RowResult::NoMatch)
+        }
+        (BatchNeed::Coordinates, Status::Match) if e.views.contains(Views::GEO) => {
+            heuristic(heuristic_from_geographies(json))
+        }
+        // A single-record NoMatch is the reliable kind; batch rows may reuse it.
+        (BatchNeed::Locations | BatchNeed::Geographies, Status::NoMatch)
+            if e.views.contains(Views::JSON) =>
+        {
+            hit(RowResult::NoMatch)
+        }
+        (BatchNeed::Locations, Status::Match) if e.views.contains(Views::JSON) => {
+            heuristic(heuristic_from_matches(json, echo, false))
+        }
+        (BatchNeed::Geographies, Status::Match) if e.views.contains(Views::JSON | Views::GEO) => {
+            heuristic(heuristic_from_matches(json, echo, true))
+        }
+        _ => BatchLookup::Miss,
+    }
+}
+
+/// Decide, inside the write transaction, what a batch result writes over `existing`.
+/// A fresh single-record Match is kept (never downgraded to a load-dependent batch
+/// answer); a batch Match only adds its batch view to it. Otherwise the batch entry
+/// replaces whatever was there.
+pub fn merge_batch(
+    existing: Option<&[u8]>,
+    new: &Entry,
+    codec: &Codec,
+    ttl_cfg: &TtlConfig,
+    class: BenchmarkClass,
+    now: SystemTime,
+) -> Option<Vec<u8>> {
+    let encode_new = || new.encode(codec).ok().map(|env| encode_stored(&env, now));
+    let Some(old) = existing.and_then(|b| decode(b, codec).ok()) else {
+        return encode_new();
+    };
+    let o = &old.entry;
+    let fresh = freshness(
+        old.created_at,
+        now,
+        ttl(ttl_cfg, o.status, o.source, class),
+        false,
+    ) == Freshness::Fresh;
+    if !(fresh && o.status == Status::Match && o.views.contains(Views::JSON)) {
+        return encode_new();
+    }
+    if new.status != Status::Match {
+        return None;
+    }
+    let mut merged = o.clone();
+    merged.payload.batch.clone_from(&new.payload.batch);
+    merged.views = merged.views | Views::BATCH;
+    merged
+        .encode(codec)
+        .ok()
+        .map(|env| encode_stored(&env, old.created_at))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::cache::envelope::{EntryPayload, EntrySource, UpstreamSingle};
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(format!(
+            "{}/tests/fixtures/live/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    fn single_entry() -> Entry {
+        let s = UpstreamSingle::from_response(&fixture("geo_address_all.json")).unwrap();
+        Entry {
+            status: s.status,
+            source: EntrySource::Single,
+            views: s.views,
+            verified_at: 0,
+            payload: s.payload,
+        }
+    }
+
+    fn batch_entry(status: Status, view: BatchView) -> Entry {
+        Entry {
+            status,
+            source: EntrySource::Batch,
+            views: Views::BATCH,
+            verified_at: 0,
+            payload: EntryPayload {
+                batch: Some(view),
+                ..EntryPayload::default()
+            },
+        }
+    }
+
+    const ECHO: &str = "4600 Silver Hill Rd, Washington, DC, 20233";
+
+    #[test]
+    fn batch_classification() {
+        let codec = Codec::default();
+        let cfg = Config::default();
+        let now = SystemTime::now();
+        let st = |e: &Entry| encode_stored(&e.encode(&codec).unwrap(), now);
+        let c = |b: &[u8], need| {
+            classify_batch(
+                Some(b),
+                &codec,
+                &cfg,
+                BenchmarkClass::Current,
+                need,
+                now,
+                ECHO,
+            )
+        };
+
+        let single = st(&single_entry());
+        assert!(matches!(
+            c(&single, BatchNeed::Geographies),
+            BatchLookup::Hit {
+                heuristic: true,
+                ..
+            }
+        ));
+
+        let loc_only = st(&batch_entry(
+            Status::Match,
+            BatchView {
+                matched_address: Some("X".into()),
+                ..BatchView::default()
+            },
+        ));
+        assert!(matches!(
+            c(&loc_only, BatchNeed::Locations),
+            BatchLookup::Hit {
+                heuristic: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            c(&loc_only, BatchNeed::Geographies),
+            BatchLookup::Miss,
+            "no geography columns"
+        );
+
+        let nm = st(&batch_entry(Status::NoMatch, BatchView::default()));
+        assert_eq!(
+            c(&nm, BatchNeed::Locations),
+            BatchLookup::Hit {
+                result: RowResult::NoMatch,
+                heuristic: false
+            }
+        );
+        let tie = st(&batch_entry(Status::Tie, BatchView::default()));
+        assert!(matches!(
+            c(&tie, BatchNeed::Geographies),
+            BatchLookup::Hit {
+                result: RowResult::Tie,
+                ..
+            }
+        ));
+
+        let old = encode_stored(
+            &single_entry().encode(&codec).unwrap(),
+            now - Duration::from_secs(400 * 86_400),
+        );
+        assert_eq!(
+            c(&old, BatchNeed::Locations),
+            BatchLookup::Miss,
+            "expired entries are misses"
+        );
+    }
+
+    #[test]
+    fn merge_rules() {
+        let codec = Codec::default();
+        let ttl_cfg = Config::default().ttl;
+        let now = SystemTime::now();
+        let single = encode_stored(
+            &single_entry().encode(&codec).unwrap(),
+            now - Duration::from_secs(10),
+        );
+        let m = |existing: Option<&[u8]>, new: &Entry| {
+            merge_batch(
+                existing,
+                new,
+                &codec,
+                &ttl_cfg,
+                BenchmarkClass::Current,
+                now,
+            )
+        };
+
+        let nomatch = batch_entry(Status::NoMatch, BatchView::default());
+        assert_eq!(
+            m(Some(&single), &nomatch),
+            None,
+            "batch No_Match never downgrades a single Match"
+        );
+
+        let matched = batch_entry(
+            Status::Match,
+            BatchView {
+                matched_address: Some("A".into()),
+                ..BatchView::default()
+            },
+        );
+        let merged = decode(&m(Some(&single), &matched).unwrap(), &codec).unwrap();
+        assert!(
+            merged
+                .entry
+                .views
+                .contains(Views::JSON | Views::GEO | Views::BATCH)
+        );
+        assert_eq!(merged.entry.source, EntrySource::Single);
+        assert!(merged.entry.payload.json.is_some());
+        assert_eq!(
+            merged.created_at,
+            now - Duration::from_secs(10),
+            "keeps the single entry's age"
+        );
+
+        let fresh_write = decode(&m(None, &nomatch).unwrap(), &codec).unwrap();
+        assert_eq!(fresh_write.entry.status, Status::NoMatch);
+        let old_batch = encode_stored(&nomatch.encode(&codec).unwrap(), now);
+        let replaced = decode(&m(Some(&old_batch), &matched).unwrap(), &codec).unwrap();
+        assert_eq!(replaced.entry.status, Status::Match);
     }
 }

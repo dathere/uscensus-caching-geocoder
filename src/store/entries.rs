@@ -95,6 +95,27 @@ impl Store {
         .await
     }
 
+    /// Write many entries in one transaction, deciding each value inside the
+    /// transaction: `f(existing, item)` returns the bytes to store, or `None` to leave
+    /// the existing value untouched. Atomic with respect to every other write.
+    pub async fn put_entries_with<T: Send + Sync + 'static>(
+        &self,
+        items: Vec<(String, T)>,
+        f: impl Fn(Option<&[u8]>, &T) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Result<(), StoreError> {
+        self.write(Box::new(move |ctx| {
+            let t = ctx.entries()?;
+            for (k, item) in &items {
+                let existing = t.get(k.as_str())?.map(|g| g.value().to_vec());
+                if let Some(v) = f(existing.as_deref(), item) {
+                    t.insert(k.as_str(), v.as_slice())?;
+                }
+            }
+            Ok(())
+        }))
+        .await
+    }
+
     /// Insert `stored` unless, at commit time, the key holds a decodable entry for which
     /// `keep(header, created_at)` is true. The check runs inside the write transaction,
     /// so it sees every earlier write, including ones queued in the same batch.
