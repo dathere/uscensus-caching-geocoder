@@ -323,14 +323,9 @@ async fn run_batch<R: Row>(
 
     let mut fetched: HashMap<String, RowResult> = HashMap::new();
     for chunk in misses.chunks(cfg.batch.chunk_size.max(1)) {
-        let results = match fetch_chunk(
-            &st,
-            &target,
-            chunk,
-            Priority::Sync,
-            |_, _| EntrySource::Batch,
-            true,
-        )
+        let results = match fetch_chunk(&st, &target, chunk, Priority::Sync, |_, _| {
+            EntrySource::Batch
+        })
         .await
         {
             Ok(r) => r,

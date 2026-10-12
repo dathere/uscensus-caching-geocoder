@@ -1,10 +1,12 @@
 //! The job runner (PLAN.md §6.3.2–8): one task that takes the next pending chunk of the
 //! highest-priority, oldest runnable job, answers its rows (cache first, then upstream
-//! at `Background` priority), and commits rows + chunk + totals in one transaction.
+//! at `Background` priority), and commits cache entries + retry-queue changes + rows +
+//! chunk + totals in one transaction, so an interrupted chunk leaves nothing behind and
+//! is simply re-run.
 
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
@@ -19,14 +21,14 @@ use super::{
     submit::result_status,
 };
 use crate::{
-    batch::{self, BatchTarget, ChunkError, Row, fetch_chunk, unix_now},
+    batch::{self, Answers, BatchTarget, ChunkError, Row, fetch_answers, unix_now},
     cache::{
-        envelope::{EntrySource, Status},
+        envelope::{Entry, EntrySource, Status},
         key::{CacheKey, SearchType},
-        views::{BatchLookup, Lookup, classify},
+        views::{BatchLookup, Lookup, classify, merge_batch},
     },
     census::{
-        batch_csv::{AddressRow, CoordRow, RowResult},
+        batch_csv::{AddressRow, CoordRow},
         types::ReturnType,
     },
     http::{
@@ -234,6 +236,8 @@ async fn finish(st: &AppState, id: &str) -> Result<(), StoreError> {
 /// What answering one chunk changes.
 #[derive(Default)]
 pub(crate) struct ChunkUpdate {
+    /// Upstream answers to store (merged with [`merge_batch`] inside the commit).
+    pub entries: Vec<(String, Entry)>,
     /// `(row idx, new state, status)` for rows that were `Pending`.
     pub rows: Vec<(u32, RowState, Option<Status>)>,
     /// Retry-queue keys whose every item is removed.
@@ -382,21 +386,20 @@ impl UploadRows {
         }
     }
 
-    /// Upload (deduplicated by key) and return answers by key (see [`fetch_chunk`]).
+    /// Upload (deduplicated by key) and return the answers (see [`fetch_answers`]);
+    /// nothing is stored until the chunk commits.
     pub async fn fetch(
         &self,
         st: &AppState,
         t: &BatchTarget,
         source: impl Fn(&str, Status) -> EntrySource,
-        queue_negatives: bool,
-    ) -> Result<HashMap<String, RowResult>, ChunkError> {
+    ) -> Result<Answers, ChunkError> {
         async fn go<R: Row>(
             st: &AppState,
             t: &BatchTarget,
             rows: &[(R, String)],
             source: impl Fn(&str, Status) -> EntrySource,
-            queue_negatives: bool,
-        ) -> Result<HashMap<String, RowResult>, ChunkError> {
+        ) -> Result<Answers, ChunkError> {
             let mut seen = HashSet::new();
             let unique: Vec<(&R, &str)> = rows
                 .iter()
@@ -404,29 +407,20 @@ impl UploadRows {
                 .map(|(r, k)| (r, k.as_str()))
                 .collect();
             if unique.is_empty() {
-                return Ok(HashMap::new());
+                return Ok(Answers::default());
             }
-            fetch_chunk(
-                st,
-                t,
-                &unique,
-                Priority::Background,
-                source,
-                queue_negatives,
-            )
-            .await
+            fetch_answers(st, t, &unique, Priority::Background, source).await
         }
         match self {
-            Self::Address(rows) => go(st, t, rows, source, queue_negatives).await,
-            Self::Coord(rows) => go(st, t, rows, source, queue_negatives).await,
+            Self::Address(rows) => go(st, t, rows, source).await,
+            Self::Coord(rows) => go(st, t, rows, source).await,
         }
     }
 }
 
 /// Address and coordinate rows: re-check the cache (a previous attempt may have
 /// stored answers before it died), then upload the remaining misses as one batch.
-/// NoMatch re-checks are queued with the entries (in `fetch_chunk`), so a crash before
-/// this chunk's commit cannot lose them.
+/// The answers, their NoMatch re-checks and the row states commit together.
 async fn geocode_batch(
     st: &AppState,
     job: &JobRecord,
@@ -449,9 +443,15 @@ async fn geocode_batch(
             BatchLookup::Miss => misses.push((*i, &row.input, row.key.as_str())),
         }
     }
-    let fetched = UploadRows::build(misses.iter().copied())
-        .fetch(st, &t, |_, _| EntrySource::Job, true)
+    let Answers {
+        results: fetched,
+        entries,
+    } = UploadRows::build(misses.iter().copied())
+        .fetch(st, &t, |_, _| EntrySource::Job)
         .await?;
+    let due = unix_now() + st.settings().config.retry.negative_delay.as_secs();
+    update.enqueue = batch::negatives(&fetched, due);
+    update.entries = entries;
     for (i, _, key) in misses {
         let Some(result) = fetched.get(key) else {
             return Err(ExecError::Other(format!("no answer for row {i}")));
@@ -536,8 +536,31 @@ async fn oneline(
 async fn commit(st: &AppState, w: &Work, update: ChunkUpdate) -> Result<(), StoreError> {
     let (id, idx) = (w.job.id.clone(), w.chunk_idx);
     let now = unix_now();
+    let (codec, ttl_cfg) = (st.codec, st.settings().config.ttl.clone());
+    let class = st.catalog.load().class(w.job.benchmark_id);
+    let stamp = SystemTime::now();
     st.store
         .write(Box::new(move |ctx| {
+            // Answers and retry progress belong to the keys: kept even if the job was
+            // deleted meanwhile.
+            let entries = ctx.entries()?;
+            for (key, entry) in &update.entries {
+                let existing = entries.get(key.as_str())?.map(|g| g.value().to_vec());
+                if let Some(v) =
+                    merge_batch(existing.as_deref(), entry, codec, &ttl_cfg, class, stamp)
+                {
+                    entries.insert(key.as_str(), v.as_slice())?;
+                }
+            }
+            if !update.dequeue.is_empty() {
+                ctx.retry_queue()?
+                    .retain(|(_, key), _| !update.dequeue.contains(key))?;
+            }
+            let q = ctx.retry_queue()?;
+            for (key, due, attempts) in &update.enqueue {
+                q.insert((*due, key.as_str()), *attempts)?;
+            }
+
             let Some(mut job) = ctx.job_record(&id)? else {
                 return Ok(());
             };
@@ -567,16 +590,7 @@ async fn commit(st: &AppState, w: &Work, update: ChunkUpdate) -> Result<(), Stor
             chunk.lease_until = None;
             ctx.put_job_chunk(&id, idx, &chunk)?;
             job.updated_at = now;
-            ctx.put_job_record(&job)?;
-            if !update.dequeue.is_empty() {
-                ctx.retry_queue()?
-                    .retain(|(_, key), _| !update.dequeue.contains(key))?;
-            }
-            let q = ctx.retry_queue()?;
-            for (key, due, attempts) in &update.enqueue {
-                q.insert((*due, key.as_str()), *attempts)?;
-            }
-            Ok(())
+            ctx.put_job_record(&job)
         }))
         .await
 }

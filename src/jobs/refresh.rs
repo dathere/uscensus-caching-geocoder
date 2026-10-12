@@ -16,7 +16,7 @@ use super::{
     worker::{ChunkUpdate, ExecError, UploadRows, target},
 };
 use crate::{
-    batch::unix_now,
+    batch::{Answers, unix_now},
     cache::{
         envelope::{EntrySource, Status},
         key::{CacheKey, SearchType},
@@ -152,26 +152,63 @@ pub async fn create_jobs(
     Ok(jobs)
 }
 
-/// Which rows of a chunk still need re-checking (their entry is still a batch/job
-/// NoMatch); the others are settled from the current entry and dequeued.
+/// What to do with one refresh row, decided from the *current* entry and retry queue
+/// just before uploading (the job's rows may be stale: an earlier or cancelled run can
+/// have re-checked the key since this job was created).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowPlan {
+    /// Nothing to re-check; `dequeue` drops the key's queue items.
+    Settle {
+        status: Option<Status>,
+        dequeue: bool,
+    },
+    /// Re-check now; `attempts` already made, from the queue.
+    Refresh { attempts: u8 },
+}
+
 pub(crate) struct RefreshPlan {
-    settled: Vec<(u32, Option<Status>)>,
+    rows: HashMap<u32, RowPlan>,
 }
 
 impl RefreshPlan {
     pub fn new(st: &AppState, rows: &[(u32, JobRow)]) -> Result<Self, ExecError> {
         let keys: Vec<&str> = rows.iter().map(|(_, r)| r.key.as_str()).collect();
         let stored = st.store.get_entries(&keys)?;
-        let mut settled = Vec::new();
-        for ((i, _), bytes) in rows.iter().zip(stored) {
+        let key_set: HashSet<String> = keys.iter().map(|k| (*k).to_owned()).collect();
+        let queued = st.store.retry_items_for(&key_set)?;
+        let now = unix_now();
+        let mut plan = HashMap::new();
+        for ((i, row), bytes) in rows.iter().zip(stored) {
             let current = bytes.and_then(|b| decode(&b, st.codec).ok());
-            match current {
-                Some(s) if needs_negative_retry(s.entry.status, s.entry.source) => {}
-                Some(s) => settled.push((*i, Some(s.entry.status))),
-                None => settled.push((*i, None)),
-            }
+            let p = match current {
+                Some(s) if needs_negative_retry(s.entry.status, s.entry.source) => {
+                    match queued.get(&row.key) {
+                        // Due: re-check with the queue's own attempt count.
+                        Some(items) if items.iter().any(|(due, _)| *due <= now) => {
+                            RowPlan::Refresh {
+                                attempts: items.iter().map(|(_, a)| *a).max().unwrap_or(0),
+                            }
+                        }
+                        // Not due yet (re-checked since this job was created) or no
+                        // longer queued: leave the queue to the run that owns it.
+                        _ => RowPlan::Settle {
+                            status: Some(s.entry.status),
+                            dequeue: false,
+                        },
+                    }
+                }
+                Some(s) => RowPlan::Settle {
+                    status: Some(s.entry.status),
+                    dequeue: true,
+                },
+                None => RowPlan::Settle {
+                    status: None,
+                    dequeue: true,
+                },
+            };
+            plan.insert(*i, p);
         }
-        Ok(Self { settled })
+        Ok(Self { rows: plan })
     }
 }
 
@@ -182,13 +219,20 @@ pub(crate) async fn execute(
     plan: RefreshPlan,
 ) -> Result<ChunkUpdate, ExecError> {
     let mut update = ChunkUpdate::default();
-    let settled: HashMap<u32, Option<Status>> = plan.settled.into_iter().collect();
     let mut todo = Vec::new();
     for (i, row) in &rows {
-        update.dequeue.insert(row.key.clone());
-        match settled.get(i) {
-            Some(status) => update.rows.push((*i, RowState::Cached, *status)),
-            None => todo.push((*i, row)),
+        match plan.rows.get(i) {
+            Some(RowPlan::Refresh { attempts }) => {
+                update.dequeue.insert(row.key.clone());
+                todo.push((*i, row, *attempts));
+            }
+            Some(RowPlan::Settle { status, dequeue }) => {
+                if *dequeue {
+                    update.dequeue.insert(row.key.clone());
+                }
+                update.rows.push((*i, RowState::Cached, *status));
+            }
+            None => update.rows.push((*i, RowState::Cached, None)),
         }
     }
     if todo.is_empty() {
@@ -199,7 +243,7 @@ pub(crate) async fn execute(
     let max = u8::try_from(cfg.retry.negative_attempts).unwrap_or(u8::MAX);
     let next_attempts: HashMap<String, u8> = todo
         .iter()
-        .map(|(_, r)| (r.key.clone(), r.attempts.saturating_add(1)))
+        .map(|(_, r, a)| (r.key.clone(), a.saturating_add(1)))
         .collect();
     let finals: HashSet<String> = next_attempts
         .iter()
@@ -208,23 +252,22 @@ pub(crate) async fn execute(
         .collect();
 
     let t = target(st, job)?;
-    let fetched = UploadRows::build(todo.iter().map(|(i, r)| (*i, &r.input, r.key.as_str())))
-        .fetch(
-            st,
-            &t,
-            |key, status| {
-                if status == Status::NoMatch && finals.contains(key) {
-                    EntrySource::Confirmed
-                } else {
-                    EntrySource::Job
-                }
-            },
-            false,
-        )
+    let Answers {
+        results: fetched,
+        entries,
+    } = UploadRows::build(todo.iter().map(|(i, r, _)| (*i, &r.input, r.key.as_str())))
+        .fetch(st, &t, |key, status| {
+            if status == Status::NoMatch && finals.contains(key) {
+                EntrySource::Confirmed
+            } else {
+                EntrySource::Job
+            }
+        })
         .await?;
+    update.entries = entries;
     let due = unix_now() + cfg.retry.negative_delay.as_secs();
     let mut requeued = HashSet::new();
-    for (i, row) in todo {
+    for (i, row, _) in todo {
         let Some(result) = fetched.get(&row.key) else {
             return Err(ExecError::Other(format!("no answer for row {i}")));
         };

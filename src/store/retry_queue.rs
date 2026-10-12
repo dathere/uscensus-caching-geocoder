@@ -1,8 +1,11 @@
 //! Queue of NoMatch entries to re-check: `(due unix secs, key) -> attempts`.
 
-use std::ops::Bound;
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Bound,
+};
 
-use redb::ReadableTableMetadata;
+use redb::{ReadableTable, ReadableTableMetadata};
 
 use super::{Store, StoreError, tables::RETRY_QUEUE};
 
@@ -66,6 +69,28 @@ impl Store {
 
     pub fn retry_len(&self) -> Result<u64, StoreError> {
         self.read(|txn| Ok(txn.open_table(RETRY_QUEUE)?.len()?))
+    }
+
+    /// Every queued `(due, attempts)` for each of `keys` (a full scan: the queue is
+    /// keyed by due time).
+    pub fn retry_items_for(
+        &self,
+        keys: &HashSet<String>,
+    ) -> Result<HashMap<String, Vec<(u64, u8)>>, StoreError> {
+        self.read(|txn| {
+            let t = txn.open_table(RETRY_QUEUE)?;
+            let mut out: HashMap<String, Vec<(u64, u8)>> = HashMap::new();
+            for item in t.iter()? {
+                let (k, v) = item?;
+                let (due, key) = k.value();
+                if keys.contains(key) {
+                    out.entry(key.to_owned())
+                        .or_default()
+                        .push((due, v.value()));
+                }
+            }
+            Ok(out)
+        })
     }
 
     pub async fn retry_remove(&self, due: u64, key: String) -> Result<(), StoreError> {

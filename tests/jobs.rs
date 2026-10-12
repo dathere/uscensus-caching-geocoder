@@ -31,12 +31,13 @@ use wiremock::{
 
 /// Answers every uploaded batch row: addresses containing "nowhere" are `No_Match`
 /// unless `matches` is set; everything else matches (geographies-width rows).
-/// Requests after the first `fast` ones stall for a minute.
+/// Requests after the first `fast` ones are delayed by `stall`.
 #[derive(Clone)]
 struct Census {
     matches: Arc<AtomicBool>,
     seen: Arc<AtomicUsize>,
     fast: usize,
+    stall: Duration,
 }
 
 impl Census {
@@ -45,6 +46,7 @@ impl Census {
             matches: Arc::new(AtomicBool::new(false)),
             seen: Arc::new(AtomicUsize::new(0)),
             fast: usize::MAX,
+            stall: Duration::from_secs(60),
         }
     }
 }
@@ -87,7 +89,7 @@ impl Respond for Census {
         }
         let t = ResponseTemplate::new(200).set_body_raw(out, "text/plain");
         if n >= self.fast {
-            t.set_delay(Duration::from_secs(60))
+            t.set_delay(self.stall)
         } else {
             t
         }
@@ -733,7 +735,7 @@ async fn job_routes_require_the_admin_token_when_set() {
 }
 
 #[tokio::test]
-async fn batch_no_match_is_queued_with_its_entry_before_any_job_commit() {
+async fn batch_endpoint_no_match_is_queued_with_its_entry() {
     use ucgeocoder::{
         batch::{BatchTarget, fetch_chunk},
         census::batch_csv::AddressRow,
@@ -758,15 +760,13 @@ async fn batch_no_match_is_queued_with_its_entry_before_any_job_commit() {
         zip: String::new(),
     };
     let key = nowhere_key();
-    // What a job chunk does before its commit: if the process died right here, the
-    // stored No_Match must already carry its retry.
+    // The batch endpoints' store step: the No_Match and its retry land together.
     let out = fetch_chunk(
         &h.state,
         &t,
         &[(&row, key.as_str())],
         Priority::Background,
-        |_, _| EntrySource::Job,
-        true,
+        |_, _| EntrySource::Batch,
     )
     .await
     .unwrap();
@@ -834,5 +834,137 @@ async fn unparseable_single_record_answer_retries_the_chunk() {
     assert_eq!((job.totals.matched, job.totals.failed), (1, 0));
     let chunks = h.state.store.job_chunks(&id).unwrap();
     assert_eq!(chunks[0].1.attempts, 1);
+    jobs.shutdown().await;
+}
+
+async fn wait_chunk(h: &Harness, id: &str, state: ucgeocoder::jobs::ChunkStatus) {
+    let start = Instant::now();
+    while !h
+        .state
+        .store
+        .job_chunks(id)
+        .unwrap()
+        .iter()
+        .any(|(_, c)| c.state == state)
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "chunk never {state:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn refresh_id(h: &Harness) -> String {
+    let (status, _, body) = send_json(h, "/api/v1/jobs/refresh-negatives", &json!({})).await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    let jobs = json(&body)["jobs"].clone();
+    assert_eq!(jobs.as_array().unwrap().len(), 1);
+    jobs[0]["id"].as_str().unwrap().to_owned()
+}
+
+/// A batch No_Match (queued an hour out) plus a queue item due now for the same key.
+async fn due_no_match(h: &Harness) {
+    upload(
+        h,
+        "/geocoder/locations/addressbatch",
+        "addressFile",
+        NOWHERE_ROW,
+        &[("benchmark", "4")],
+    )
+    .await;
+    h.state
+        .store
+        .retry_enqueue(nowhere_key(), 0, 0)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_stale_refresh_job_does_not_recheck_a_key_its_cancelled_twin_handled() {
+    let h = harness(|_| {}).await;
+    let mut census = Census::new();
+    census.fast = 1; // the refresh upload takes a while
+    census.stall = Duration::from_millis(400);
+    mount(&h, &census).await;
+    due_no_match(&h).await;
+    let jobs = worker::spawn(h.state.clone());
+
+    let a = refresh_id(&h).await;
+    wait_chunk(&h, &a, ucgeocoder::jobs::ChunkStatus::InFlight).await;
+    // Cancelling makes A inactive while its upload is still running, so B is allowed
+    // and captures the same key with the same (stale) attempt count.
+    let (status, _, _) = post_empty(&h, &format!("/api/v1/jobs/{a}/cancel")).await;
+    assert_eq!(status, 200);
+    let b = refresh_id(&h).await;
+    let job_b = wait_for(&h, &b, finished).await;
+    let start = Instant::now();
+    while !h
+        .state
+        .store
+        .job_chunks(&a)
+        .unwrap()
+        .iter()
+        .all(|(_, c)| c.state == ucgeocoder::jobs::ChunkStatus::Done)
+    {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // A's re-check counted once and re-queued the key an hour out; B did not upload.
+    assert_eq!(uploads(&h).await.len(), 2);
+    let due = h.state.store.retry_due(u64::MAX, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].attempts, 1);
+    assert!(due[0].due > 1000);
+    assert_eq!((job_b.totals.cached, job_b.totals.no_match), (1, 1));
+    jobs.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_interrupted_refresh_leaves_no_partial_progress() {
+    let h = harness(|_| {}).await;
+    let mut census = Census::new();
+    census.fast = 1; // the refresh upload hangs
+    mount(&h, &census).await;
+    due_no_match(&h).await;
+    let jobs = worker::spawn(h.state.clone());
+    let id = refresh_id(&h).await;
+    wait_chunk(&h, &id, ucgeocoder::jobs::ChunkStatus::InFlight).await;
+    jobs.shutdown().await;
+    let Harness {
+        server,
+        state,
+        app,
+        dir,
+    } = h;
+    drop(app);
+    drop(state);
+
+    let h = harness_with(server, dir, |_| {});
+    h.server.reset().await;
+    mount(&h, &Census::new()).await;
+    // Nothing of the interrupted re-check was written: the entry is still the batch
+    // No_Match and both queue items are still there with no attempt counted.
+    let bytes = h.state.store.get_entry(&nowhere_key()).unwrap().unwrap();
+    assert_eq!(
+        decode(&bytes, h.state.codec).unwrap().entry.source,
+        EntrySource::Batch
+    );
+    assert_eq!(h.state.store.retry_len().unwrap(), 2);
+
+    let jobs = worker::spawn(h.state.clone());
+    let job = wait_for(&h, &id, finished).await;
+    assert_eq!(job.state, JobState::Completed);
+    // Re-run once after the restart: exactly one attempt counted.
+    assert_eq!(uploads(&h).await.len(), 1);
+    let due = h.state.store.retry_due(u64::MAX, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].attempts, 1);
+    let bytes = h.state.store.get_entry(&nowhere_key()).unwrap().unwrap();
+    assert_eq!(
+        decode(&bytes, h.state.codec).unwrap().entry.source,
+        EntrySource::Job
+    );
     jobs.shutdown().await;
 }

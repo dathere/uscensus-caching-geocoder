@@ -171,22 +171,26 @@ pub async fn lookup(
     Ok(out)
 }
 
-/// Upload one chunk of rows (`(row, key)`, distinct keys), store every answer with
-/// `source(key, status)` as its provenance, and return the answers by key. With
-/// `queue_negatives`, every NoMatch key is queued for a re-check (`retry.negative_delay`)
-/// in the same transaction that stores it.
+/// The parsed answers of one upload: results by key and the entries to store.
+#[derive(Debug, Default)]
+pub struct Answers {
+    pub results: HashMap<String, RowResult>,
+    pub entries: Vec<(String, Entry)>,
+}
+
+/// Upload one chunk of rows (`(row, key)`, distinct keys) and build an entry for every
+/// answer with `source(key, status)` as its provenance. Nothing is stored: callers
+/// write the entries (with [`merge_batch`]) in the transaction that suits them.
 ///
 /// Upstream output is parsed strictly: an unparseable record or a submitted row missing
-/// from the response fails the whole chunk (never a fabricated `No_Match`). Storage
-/// failures are logged and the answers still returned.
-pub async fn fetch_chunk<R: Row>(
+/// from the response fails the whole chunk (never a fabricated `No_Match`).
+pub async fn fetch_answers<R: Row>(
     st: &AppState,
     t: &BatchTarget,
     rows: &[(&R, &str)],
     prio: Priority,
     source: impl Fn(&str, Status) -> EntrySource,
-    queue_negatives: bool,
-) -> Result<HashMap<String, RowResult>, ChunkError> {
+) -> Result<Answers, ChunkError> {
     let csv = R::upload(rows.iter().map(|(r, _)| *r));
     let vintage_param = t.upstream_vintage.then_some(t.vintage.id);
     let resp = match st
@@ -228,7 +232,6 @@ pub async fn fetch_chunk<R: Row>(
         });
     }
 
-    let now = SystemTime::now();
     let verified_at = unix_now();
     let mut results = HashMap::with_capacity(rows.len());
     let mut to_store: Vec<(String, Entry)> = Vec::with_capacity(rows.len());
@@ -262,22 +265,31 @@ pub async fn fetch_chunk<R: Row>(
         ));
         results.insert((*key).to_owned(), result);
     }
+    Ok(Answers {
+        results,
+        entries: to_store,
+    })
+}
+
+/// [`fetch_answers`], then store the entries (merged inside the write transaction) and
+/// queue every NoMatch key for a re-check (`retry.negative_delay`) in that same
+/// transaction. Storage failures are logged and the answers still returned.
+pub async fn fetch_chunk<R: Row>(
+    st: &AppState,
+    t: &BatchTarget,
+    rows: &[(&R, &str)],
+    prio: Priority,
+    source: impl Fn(&str, Status) -> EntrySource,
+) -> Result<HashMap<String, RowResult>, ChunkError> {
+    let Answers { results, entries } = fetch_answers(st, t, rows, prio, source).await?;
     let cfg = st.settings().config.clone();
-    let retries = if queue_negatives {
-        let due = verified_at + cfg.retry.negative_delay.as_secs();
-        results
-            .iter()
-            .filter(|(_, r)| **r == RowResult::NoMatch)
-            .map(|(k, _)| (k.clone(), due, 0))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let (codec, ttl_cfg, class) = (st.codec, cfg.ttl, t.class);
+    let due = unix_now() + cfg.retry.negative_delay.as_secs();
+    let retries = negatives(&results, due);
+    let (codec, ttl_cfg, class, now) = (st.codec, cfg.ttl, t.class, SystemTime::now());
     if let Err(e) = st
         .store
         .put_entries_with(
-            to_store,
+            entries,
             move |existing, entry| merge_batch(existing, entry, codec, &ttl_cfg, class, now),
             retries,
         )
@@ -286,4 +298,13 @@ pub async fn fetch_chunk<R: Row>(
         warn!(error = %e, "storing batch results failed; serving uncached");
     }
     Ok(results)
+}
+
+/// Retry-queue items `(key, due, 0)` for every NoMatch answer.
+pub fn negatives(results: &HashMap<String, RowResult>, due: u64) -> Vec<(String, u64, u8)> {
+    results
+        .iter()
+        .filter(|(_, r)| **r == RowResult::NoMatch)
+        .map(|(k, _)| (k.clone(), due, 0))
+        .collect()
 }
