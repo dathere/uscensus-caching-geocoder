@@ -75,9 +75,10 @@ golden tests against responses captured from census.gov (`tests/fixtures/live/`)
 - **Not mirrored on purpose.** A missing file gets a JSON 400 (Census serves its HTML form
   there). Broken CSV quoting gets a 400 naming the rows (Census answers 500).
 - **Single-record errors.**
-  - A missing `benchmark`, a missing `vintage` on a geographies request, and an invalid
-    JSONP `callback` are answered locally, without contacting Census. The text is Census's
-    own, and no `X-Cache` header is sent.
+  - With `format=json` (or `format=jsonp` and a valid `callback`), a missing `benchmark`
+    and a missing `vintage` on a geographies request are answered locally, without
+    contacting Census. The text is Census's own, and no `X-Cache` header is sent. An
+    invalid JSONP `callback` is also answered locally.
   - Other requests the proxy cannot key (unknown benchmark/vintage, missing address fields,
     `format` other than `json`/`jsonp`) are passed through to Census uncached and answered
     verbatim with `X-Cache: BYPASS`.
