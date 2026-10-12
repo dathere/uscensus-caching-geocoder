@@ -269,7 +269,8 @@ pub fn import_record(rec: ExportRecord, codec: &Codec) -> Result<Imported, Recor
 /// for address searches (each with a `geographies` object of layers when the entry has
 /// the GEO view), a `geographies` object of layers for coordinates.
 fn check_json_shape(st: SearchType, views: Views, json: &str) -> Result<(), String> {
-    type Layers<'a> = IndexMap<String, &'a RawValue>;
+    // Each layer is an array of feature objects (what `flat` and filtering read).
+    type Layers<'a> = IndexMap<String, Vec<IndexMap<String, &'a RawValue>>>;
     if st == SearchType::Coordinates {
         return serde_json::from_str::<Layers<'_>>(json)
             .map(drop)
@@ -499,7 +500,12 @@ mod tests {
         assert_eq!(e.payload.json.unwrap().as_slice(), pretty.as_bytes());
 
         // Shapes the renderer cannot read are rejected.
-        for (json, views) in [(r#"{"x":1}"#, 1), ("[1]", 1), (r#"[{"a":1}]"#, 3)] {
+        for (json, views) in [
+            (r#"{"x":1}"#, 1),
+            ("[1]", 1),
+            (r#"[{"a":1}]"#, 3),
+            (r#"[{"a":1,"geographies":{"States":[1]}}]"#, 3),
+        ] {
             let r =
                 serde_json::from_str::<ExportRecord>(&record(Some(json), Status::Match, views, 5))
                     .unwrap();
