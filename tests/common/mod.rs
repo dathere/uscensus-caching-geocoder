@@ -53,6 +53,11 @@ pub fn test_config(server: &MockServer, dir: &TempDir) -> Config {
 pub async fn harness(tweak: impl FnOnce(&mut Config)) -> Harness {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
+    harness_with(server, dir, tweak)
+}
+
+/// A harness over an existing mock server and store directory (reopening a store).
+pub fn harness_with(server: MockServer, dir: TempDir, tweak: impl FnOnce(&mut Config)) -> Harness {
     let mut settings = config::load(&Layers {
         toml: None,
         env: &|_| None,
@@ -108,4 +113,26 @@ pub fn x_cache(h: &HeaderMap) -> &str {
 
 pub fn json(b: &[u8]) -> serde_json::Value {
     serde_json::from_slice(b).unwrap()
+}
+
+const BOUNDARY: &str = "ucgtestboundary";
+
+pub fn multipart(file_field: &str, file: &[u8], fields: &[(&str, &str)]) -> (String, Vec<u8>) {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"in.csv\"\r\nContent-Type: text/csv\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(file);
+    body.extend_from_slice(b"\r\n");
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={BOUNDARY}"), body)
 }

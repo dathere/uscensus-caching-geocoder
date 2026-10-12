@@ -209,6 +209,7 @@ async fn single(
                 fetch_geo,
                 need,
                 class,
+                prio: Priority::Sync,
             };
             let sf_key = format!("{key}#{}", if fetch_geo { 'g' } else { 'l' });
             match st.singleflight.run(sf_key, || job.run()).await {
@@ -263,20 +264,22 @@ async fn single(
     }
 }
 
-/// One coalesced upstream fetch + store.
-struct FetchJob {
-    state: SharedState,
-    key: CacheKey,
-    input: KeyInput,
-    benchmark_id: u32,
-    vintage_id: u32,
-    fetch_geo: bool,
-    need: Need,
-    class: BenchmarkClass,
+/// One upstream fetch + store (coalesced by singleflight for live requests; run
+/// directly, at `Background` priority, by jobs).
+pub(crate) struct FetchJob {
+    pub state: SharedState,
+    pub key: CacheKey,
+    pub input: KeyInput,
+    pub benchmark_id: u32,
+    pub vintage_id: u32,
+    pub fetch_geo: bool,
+    pub need: Need,
+    pub class: BenchmarkClass,
+    pub prio: Priority,
 }
 
 impl FetchJob {
-    async fn run(self) -> FetchResult {
+    pub async fn run(self) -> FetchResult {
         let st = &self.state;
         // Another fetch may have stored this key between our lookup and joining.
         if let Ok(Some(bytes)) = st.store.get_entry(self.key.as_str()) {
@@ -298,7 +301,7 @@ impl FetchJob {
             benchmark_id: self.benchmark_id,
             vintage_id: self.fetch_geo.then_some(self.vintage_id),
         };
-        let resp = match st.upstream.fetch_single(Priority::Sync, q).await {
+        let resp = match st.upstream.fetch_single(self.prio, q).await {
             Ok(r) => r,
             Err(UpstreamError::Rejected(r)) => return Err(FetchFailure::Forward(r)),
             Err(UpstreamError::BreakerOpen(b)) => {

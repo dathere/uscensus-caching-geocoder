@@ -11,7 +11,7 @@
 //! | 1 | 4 | `dict_id` u32 LE (0 = none) |
 //! | 5 | 1 | `codec`: 0 raw, 1 zstd+dict, 2 zstd |
 //! | 6 | 1 | `status`: 0 Match, 1 NoMatch, 2 Tie |
-//! | 7 | 1 | `source`: 0 Single, 1 Batch, 2 Job, 3 Import |
+//! | 7 | 1 | `source`: 0 Single, 1 Batch, 2 Job, 3 Import, 4 Confirmed (re-checked NoMatch) |
 //! | 8 | 1 | `views` bitflags: 0x01 JSON, 0x02 GEO, 0x04 BATCH |
 //! | 9 | 8 | `verified_at` u64 LE unix seconds |
 //! | 17 | n | payload: `rmp_serde::to_vec_named(EntryPayload)`, compressed per `codec` |
@@ -54,6 +54,9 @@ pub enum EntrySource {
     Batch = 1,
     Job = 2,
     Import = 3,
+    /// A batch/job NoMatch re-checked `retry.negative_attempts` times by the
+    /// refresh-negatives job: kept for `ttl.nomatch_single`, no further retries.
+    Confirmed = 4,
 }
 
 impl EntrySource {
@@ -63,6 +66,7 @@ impl EntrySource {
             1 => Some(Self::Batch),
             2 => Some(Self::Job),
             3 => Some(Self::Import),
+            4 => Some(Self::Confirmed),
             _ => None,
         }
     }

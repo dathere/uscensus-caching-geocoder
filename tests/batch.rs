@@ -6,33 +6,11 @@ use axum::{
     body::{Body, Bytes},
     http::{HeaderMap, Request, StatusCode},
 };
-use common::{Harness, fixture, harness, json, x_cache};
+use common::{Harness, fixture, harness, json, multipart, x_cache};
 use wiremock::{
     Mock, ResponseTemplate,
     matchers::{body_string_contains, method, path},
 };
-
-const BOUNDARY: &str = "ucgtestboundary";
-
-fn multipart(file_field: &str, file: &[u8], fields: &[(&str, &str)]) -> (String, Vec<u8>) {
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"in.csv\"\r\nContent-Type: text/csv\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(file);
-    body.extend_from_slice(b"\r\n");
-    for (k, v) in fields {
-        body.extend_from_slice(
-            format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
-                .as_bytes(),
-        );
-    }
-    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
-    (format!("multipart/form-data; boundary={BOUNDARY}"), body)
-}
 
 async fn post(
     h: &Harness,

@@ -1,8 +1,11 @@
 //! Path segments of `/geocoder/{returntype}/{searchtype}`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::cache::key::SearchType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ReturnType {
     Locations,
     Geographies,

@@ -10,7 +10,10 @@ use std::fmt;
 
 pub const KEY_VERSION: &str = "v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
 pub enum SearchType {
     Oneline,
     Address,

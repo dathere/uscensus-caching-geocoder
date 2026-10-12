@@ -4,6 +4,7 @@ use std::{sync::Arc, time::Instant};
 
 use arc_swap::ArcSwap;
 use serde_json::Value;
+use tokio::sync::Notify;
 use tracing::warn;
 
 use crate::{
@@ -34,6 +35,8 @@ pub struct AppState {
     pub codec: &'static Codec,
     pub stats: Arc<StatsBuffer>,
     pub started_at: Instant,
+    /// Wakes the job runner (new job, resume).
+    pub jobs_notify: Notify,
 }
 
 impl AppState {
@@ -48,6 +51,7 @@ impl AppState {
             codec: Codec::embedded(),
             stats: Arc::new(StatsBuffer::default()),
             started_at: Instant::now(),
+            jobs_notify: Notify::new(),
         })
     }
 

@@ -264,6 +264,11 @@ pub fn classify_batch(
     {
         return BatchLookup::Miss;
     }
+    batch_answer(e, need, echo)
+}
+
+/// The batch row an entry yields for `need`, regardless of its age.
+pub fn batch_answer(e: &Entry, need: BatchNeed, echo: &str) -> BatchLookup {
     let hit = |result| BatchLookup::Hit {
         result,
         heuristic: false,

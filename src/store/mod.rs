@@ -9,6 +9,7 @@
 pub mod catalog;
 pub mod config_overrides;
 pub mod entries;
+pub mod jobs;
 pub mod retry_queue;
 pub mod stats;
 pub mod tables;

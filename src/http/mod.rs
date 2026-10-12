@@ -1,5 +1,6 @@
 //! HTTP surface: router assembly and the server loop.
 
+pub mod api_jobs;
 pub mod batch;
 pub mod geocoder;
 
@@ -27,6 +28,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/healthz", get(healthz))
         .merge(geocoder::routes())
         .merge(batch::routes(max_body))
+        .merge(api_jobs::routes(max_body))
         .with_state(state)
 }
 
@@ -78,6 +80,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         state.stats.clone(),
         Duration::from_secs(cfg.store.hitcount_flush_secs),
     );
+    let jobs = crate::jobs::worker::spawn(state.clone());
     let listener = TcpListener::bind(cfg.server.bind)
         .await
         .with_context(|| format!("binding {}", cfg.server.bind))?;
@@ -87,6 +90,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    // The job tasks hold the state: stop them so the final drop below is the last.
+    jobs.shutdown().await;
     flusher.abort();
     if let Err(e) = state.store.flush_stats(&state.stats).await {
         warn!(error = %e, "final stats flush failed");

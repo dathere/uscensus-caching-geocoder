@@ -265,6 +265,38 @@ pub fn coord_rows(records: Vec<Record>) -> Result<Vec<CoordRow>, BatchInputError
     }
 }
 
+/// One `id, address` row of a oneline job upload (Census has no oneline batch endpoint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnelineRow {
+    pub idx: u32,
+    pub user_id: String,
+    pub address: String,
+}
+
+/// `id, address`; rows with more than two fields or an empty address are malformed.
+pub fn oneline_rows(records: Vec<Record>) -> Result<Vec<OnelineRow>, BatchInputError> {
+    let mut rows = Vec::with_capacity(records.len());
+    let mut bad = Vec::new();
+    for (line, r) in records {
+        if is_blank(&r) {
+            continue;
+        }
+        match r.as_slice() {
+            [id, address] if !address.trim().is_empty() => rows.push(OnelineRow {
+                idx: u32::try_from(line).unwrap_or(u32::MAX),
+                user_id: id.clone(),
+                address: address.clone(),
+            }),
+            _ => bad.push(line),
+        }
+    }
+    if bad.is_empty() {
+        Ok(rows)
+    } else {
+        Err(BatchInputError::Malformed(bad))
+    }
+}
+
 /// Body uploaded to Census: our row number as the id.
 pub fn upload_addresses<'a>(rows: impl IntoIterator<Item = &'a AddressRow>) -> Vec<u8> {
     let mut w = csv::WriterBuilder::new().from_writer(Vec::new());
@@ -413,21 +445,22 @@ fn s(o: &Option<String>) -> &str {
     o.as_deref().unwrap_or("")
 }
 
+/// An address-style row: `user_id` plus the `input` column (`echo`).
 pub fn write_address_row(
     w: &mut csv::Writer<Vec<u8>>,
-    row: &AddressRow,
+    user_id: &str,
+    echo: &str,
     result: &RowResult,
     geographies: bool,
 ) -> csv::Result<()> {
-    let echo = row.echo();
     match result {
-        RowResult::NoMatch => w.write_record([row.user_id.as_str(), &echo, "No_Match"]),
-        RowResult::Tie => w.write_record([row.user_id.as_str(), &echo, "Tie"]),
+        RowResult::NoMatch => w.write_record([user_id, echo, "No_Match"]),
+        RowResult::Tie => w.write_record([user_id, echo, "Tie"]),
         RowResult::Match(v) => {
             let lonlat = format!("{},{}", s(&v.lon), s(&v.lat));
             let mut rec = vec![
-                row.user_id.as_str(),
-                &echo,
+                user_id,
+                echo,
                 "Match",
                 s(&v.match_type),
                 s(&v.matched_address),
@@ -460,6 +493,16 @@ pub fn write_coord_row(
         RowResult::NoMatch => w.write_record(head.into_iter().chain(["No_Match"])),
         RowResult::Tie => w.write_record(head.into_iter().chain(["Tie"])),
     }
+}
+
+/// A row with no Census answer (a job row still `Pending` or `Failed`): the input
+/// columns followed by `label`. Not Census vocabulary; never a fabricated `No_Match`.
+pub fn write_label_row(
+    w: &mut csv::Writer<Vec<u8>>,
+    head: &[&str],
+    label: &str,
+) -> csv::Result<()> {
+    w.write_record(head.iter().copied().chain([label]))
 }
 
 // ---------------------------------------------------------------- heuristics
@@ -575,7 +618,7 @@ mod tests {
                 Status::NoMatch => RowResult::NoMatch,
                 Status::Tie => RowResult::Tie,
             };
-            write_address_row(&mut w, r, &res, geographies).unwrap();
+            write_address_row(&mut w, &r.user_id, &r.echo(), &res, geographies).unwrap();
         }
         w.into_inner().unwrap()
     }

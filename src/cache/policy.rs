@@ -38,7 +38,9 @@ pub fn ttl(
         (Status::Match, BenchmarkClass::Fixed) => cfg.match_fixed,
         (Status::Tie, _) => cfg.tie,
         (Status::NoMatch, _) => match source {
-            EntrySource::Single | EntrySource::Import => cfg.nomatch_single,
+            EntrySource::Single | EntrySource::Import | EntrySource::Confirmed => {
+                cfg.nomatch_single
+            }
             EntrySource::Batch | EntrySource::Job => cfg.nomatch_batch,
         },
     };
@@ -114,6 +116,8 @@ mod tests {
         assert!(needs_negative_retry(NoMatch, Job));
         assert!(!needs_negative_retry(NoMatch, Single));
         assert!(!needs_negative_retry(Match, Batch));
+        assert_eq!(ttl(&c, NoMatch, Confirmed, Current), Some(30 * DAY));
+        assert!(!needs_negative_retry(NoMatch, Confirmed));
     }
 
     #[test]
