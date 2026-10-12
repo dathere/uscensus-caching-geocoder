@@ -1,5 +1,6 @@
 //! HTTP surface: router assembly and the server loop.
 
+pub mod admin_ui;
 pub mod api_admin;
 pub mod api_cache;
 pub mod api_jobs;
@@ -69,6 +70,7 @@ pub fn router(state: SharedState) -> Router {
                 .route_layer(axum::middleware::from_fn(metrics::count_requests)),
         )
         .merge(api)
+        .merge(admin_ui::routes())
         .with_state(state)
 }
 
