@@ -306,6 +306,8 @@ It runs as uid 65532 and keeps the cache in `/data`. A named volume inherits tha
 ownership; a bind-mounted host directory must be writable by uid 65532. `.git` is not
 copied into the build, so the version string's git sha comes only from `UCG_GIT_SHA`.
 CI builds the image (without pushing it) on every push.
+The binary uses mimalloc as its allocator; musl's own allocator was about 4.6× slower
+under concurrent cache hits.
 
 ## Development
 
