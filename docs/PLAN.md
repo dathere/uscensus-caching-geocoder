@@ -407,7 +407,7 @@ Phases 0–10 are committed on `main`; the gate (`cargo fmt --check && cargo cli
 - Also handed over: `e356fca` (live Tie row-shape check, roborev 5309 passed) is the last commit before the Docker work.
 
 **Still open (not started, not blocking):**
-- The release workflow has only been `actionlint`ed; the first `v*` tag is its first real run. CI (`check`, `docker` on amd64, `deny`) first ran green on GitHub for `335560f` (run 38327492793, 2026-10-13); `cargo-deny` has still never been run locally.
+- The release workflow has only been `actionlint`ed; the first `v*` tag is its first real run. That includes the static musl targets (`x86_64-unknown-linux-musl` on `ubuntu-latest`, `aarch64-unknown-linux-musl` on `ubuntu-24.04-arm`), built by `docker run rust:1.99-alpine` like the Dockerfile; their exact build command was run locally for both (amd64 under emulation) and the binaries run in `distroless/static`, but the runner side (the arm label, docker on it) is untested. CI (`check`, `docker` on amd64, `deny`) first ran green on GitHub for `335560f` (run 38327492793, 2026-10-13); `cargo-deny` has still never been run locally.
 - `tests/live.rs` checks the Tie case by row shape only (batch Tie/No_Match answers are load-dependent upstream); the other cases are byte-exact and can flap only if Census changes its texts or data.
 - `.serena/logs/` was untracked at the start of the Phase 7–10 session and was deliberately left alone.
 - Two config keys have no implementation (documented as reserved in the README, `check-config` and `ucgeocoder.example.toml`): `jobs.single_record_upgrade` (Phase 7, deferred) and `batch.serve_partial_json_from_batch` (§5.4's `X-UCG-Partial` synthesis; found unimplemented by roborev 5305).

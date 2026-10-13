@@ -1,8 +1,8 @@
 name: Release
 
 # Push a `vX.Y.Z` tag matching Cargo.toml's version to build binaries and publish a
-# GitHub release. Targets are limited to ones that build with the default TLS backend
-# (aws-lc-rs) without extra tooling; musl and Windows are not attempted yet.
+# GitHub release. The musl targets are built in the same rust:1.99-alpine image the
+# Dockerfile uses (static binaries); Windows is not attempted yet.
 
 on:
   push:
@@ -35,6 +35,12 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
@@ -43,16 +49,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
+        if: ${{ !matrix.musl }}
         with:
           toolchain: "1.99"
           targets: ${{ matrix.target }}
+      # Skipped for musl: docker writes target/ as root, which the cache post-step can't save.
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !matrix.musl }}
         with:
           key: ${{ matrix.target }}
       - name: build
+        if: ${{ !matrix.musl }}
         env:
           UCG_GIT_SHA: ${{ github.sha }}
         run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: build (musl, static)
+        if: ${{ matrix.musl }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e UCG_GIT_SHA="${{ github.sha }}" rust:1.99-alpine \
+            sh -c 'apk add --no-cache musl-dev && cargo build --release --locked --target "${{ matrix.target }}"'
+          file "target/${{ matrix.target }}/release/ucgeocoder" | tee /dev/stderr | grep -q 'static'
       - name: package
         id: package
         shell: bash
