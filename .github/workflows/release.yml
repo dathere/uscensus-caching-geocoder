@@ -67,13 +67,11 @@ jobs:
           key: ${{ matrix.target }}
       - name: build
         if: ${{ !matrix.musl }}
-        env:
-          UCG_GIT_SHA: ${{ github.sha }}
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: UCG_GIT_SHA="${GITHUB_SHA::12}" cargo build --release --locked --target "${{ matrix.target }}"
       - name: build (musl, static)
         if: ${{ matrix.musl }}
         run: |
-          docker run --rm -v "$PWD:/src" -w /src -e UCG_GIT_SHA="${{ github.sha }}" rust:1.99-alpine \
+          docker run --rm -v "$PWD:/src" -w /src -e UCG_GIT_SHA="${GITHUB_SHA::12}" rust:1.99-alpine \
             sh -c 'apk add --no-cache musl-dev && cargo build --release --locked --target "${{ matrix.target }}"'
           file "target/${{ matrix.target }}/release/ucgeocoder" | tee /dev/stderr | grep -q 'static'
       - name: package
