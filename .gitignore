@@ -7,3 +7,4 @@
 /resources/samples/
 .DS_Store
 scripts/__pycache__/
+/.serena/logs

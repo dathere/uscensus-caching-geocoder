@@ -35,7 +35,12 @@ project_name: "uscensus-caching-geocoder"
 # When using multiple language servers, the first language server that supports a given file will be used for that file.
 # The first language server is the default language and the respective language server will be used as a fallback.
 # Note that when using the JetBrains backend, language servers are not used and this list is correspondingly ignored.
-language_servers: [rust]
+language_servers:
+  - rust
+  - typescript
+  - python
+  - scss
+  - html
 
 # the encoding used by text files in the project
 # For a list of possible encodings, see https://docs.python.org/3.11/library/codecs.html#standard-encodings
