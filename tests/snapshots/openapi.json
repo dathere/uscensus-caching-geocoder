@@ -1,0 +1,2193 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ucgeocoder",
+    "description": "Caching, rate-limited, wire-compatible proxy for the US Census Geocoder API",
+    "license": {
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "List jobs, oldest first.",
+        "operationId": "list_jobs",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/JobState"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The last id of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Submit a job (multipart upload or JSON rows).",
+        "operationId": "submit_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitJson"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/JobUpload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Job created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Missing or wrong bearer token"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/refresh-negatives": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Create refresh-negatives jobs for due NoMatch keys (409 while one is active).",
+        "operationId": "refresh_negatives",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/RefreshRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter"
+          },
+          "409": {
+            "description": "A refresh job is already active"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "One job with progress and ETA.",
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Delete a job with its rows (cached answers stay).",
+        "operationId": "delete_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such job"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/pause": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Pause a queued or running job (the chunk in flight finishes).",
+        "operationId": "pause_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          },
+          "409": {
+            "description": "Not allowed in the job's state"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/resume": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Resume a paused job.",
+        "operationId": "resume_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          },
+          "409": {
+            "description": "Not allowed in the job's state"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Cancel a job; pending rows stay pending.",
+        "operationId": "cancel_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          },
+          "409": {
+            "description": "Not allowed in the job's state"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/results": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Rows joined with the current cache entries, as batch CSV or JSON lines.",
+        "operationId": "job_results",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`csv` (default) or `json` (JSON lines).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "only",
+            "in": "query",
+            "description": "`unmatched`: only rows that are not a Match.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Results",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/stats": {
+      "get": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Entry counts, file size, hit ratio, retry queue, jobs and redb table statistics.",
+        "operationId": "stats",
+        "parameters": [
+          {
+            "name": "detail",
+            "in": "query",
+            "description": "`full`: also scan every entry header for per-status/searchtype/benchmark counts\nand sample the compression ratio (slower; the default is cheap enough to poll).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cache/entries": {
+      "get": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Paginated entry listing (header fields only).",
+        "operationId": "list_entries",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Key prefix (e.g. `v1|address|4|`); combined with nothing else.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "searchtype",
+            "in": "query",
+            "description": "`oneline`, `address`, `addressPR` or `coordinates`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "benchmark",
+            "in": "query",
+            "description": "Benchmark id or name (with `searchtype`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`Match`, `NoMatch` or `Tie`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 1000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/entries/{key}": {
+      "get": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "One decoded entry. Percent-encode the key (it contains `|`, `;`, spaces, maybe `/`).",
+        "operationId": "get_entry",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Cache key, percent-encoded",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Delete one entry.",
+        "operationId": "delete_entry",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Cache key, percent-encoded",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such entry"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/purge": {
+      "post": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Delete (or with `dry_run`, count) entries by scope. Per-entry hit counters and retry\nqueue items of purged keys are left in place (a refresh settles a missing entry).",
+        "operationId": "purge_entries",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PurgeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurgeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad scope or value"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/export": {
+      "get": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Stream entries as JSON lines (decoded; importable into any build).",
+        "operationId": "export",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Only keys starting with this prefix.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON lines of `ExportRecord`",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cache/import": {
+      "post": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Restore exported JSON lines, or warm the cache from a CSV via a `warm` job. The body\nis bounded by `server.max_body_mb`.",
+        "operationId": "import",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`jsonl` (default): restore exported entries. `csv`: geocode the rows as a cache\nwarming job (`returntype`, `benchmark`, `vintage`, `searchtype` as for jobs).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "returntype",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "benchmark",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vintage",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "searchtype",
+            "in": "query",
+            "description": "`address` (default), `onelineaddress` or `coordinates`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-ndjson": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Entries restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Warming job created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad parameters or file"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/compact": {
+      "post": {
+        "tags": [
+          "cache"
+        ],
+        "summary": "Reclaim free space (`Database::compact`). Reads and writes wait while it runs.",
+        "operationId": "compact",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Benchmarks and vintages in effect (with default layer lists).",
+        "operationId": "get_catalog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/refresh": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Refetch benchmarks and vintages from upstream (background priority). 502 if any\npart failed (the previous catalog stays in effect for it).",
+        "operationId": "refresh",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogView"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream refresh failed (partly or entirely)"
+          }
+        }
+      }
+    },
+    "/api/v1/config": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Effective configuration with the source of every value (secrets redacted).",
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Set runtime overrides (`{\"throttle.single_rps\": 2, \"ttl.tie\": \"7d\"}`), persisted and\napplied immediately (the upstream limiter is rebuilt). Only the `cache`, `ttl`,\n`retry`, `batch`, `jobs` and `throttle` sections can be overridden.",
+        "operationId": "put_config",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown, fixed or invalid key/value"
+          }
+        }
+      }
+    },
+    "/api/v1/config/{path}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Remove one runtime override; the key falls back to its startup value.",
+        "operationId": "delete_config",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Dotted key, e.g. `throttle.single_rps`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No override for that key"
+          }
+        }
+      }
+    },
+    "/api/v1/upstream": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Limiter, in-flight requests, circuit breaker and recent upstream errors.",
+        "operationId": "get_upstream",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/upstream/breaker/reset": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Close the circuit breaker now.",
+        "operationId": "reset_breaker",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamView"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BatchView": {
+        "type": "object",
+        "description": "Batch CSV fields for one row. Strings are kept exactly as upstream wrote them.",
+        "properties": {
+          "match_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "matched_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tiger_line_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "side": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "county": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tract": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "block": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BenchmarkView": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "is_default",
+          "class",
+          "vintages"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "class": {
+            "type": "string",
+            "description": "`current` (data drifts behind the id) or `fixed`."
+          },
+          "vintages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VintageView"
+            }
+          }
+        }
+      },
+      "BreakerState": {
+        "type": "object",
+        "description": "Snapshot of the breaker for health/admin endpoints.",
+        "required": [
+          "open",
+          "consecutive_failures",
+          "retry_after_secs"
+        ],
+        "properties": {
+          "open": {
+            "type": "boolean"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "retry_after_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the breaker half-opens (0 when closed).",
+            "minimum": 0
+          },
+          "open_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds when it half-opens, if open.",
+            "minimum": 0
+          }
+        }
+      },
+      "CacheStats": {
+        "type": "object",
+        "required": [
+          "entries",
+          "file_bytes",
+          "retry_queue_len",
+          "counters",
+          "jobs",
+          "entries_table"
+        ],
+        "properties": {
+          "entries": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "file_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "retry_queue_len": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "counters": {
+            "type": "object",
+            "description": "`hits`, `misses`, `stale_hits`, `upstream_ok`, `upstream_err` (stored + unflushed).",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "hit_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`hits / (hits + misses)`, when any request was counted."
+          },
+          "jobs": {
+            "type": "object",
+            "description": "Jobs by state.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "entries_table": {
+            "$ref": "#/components/schemas/TableStatsView"
+          },
+          "detail": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StatsDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "CatalogView": {
+        "type": "object",
+        "required": [
+          "benchmarks"
+        ],
+        "properties": {
+          "benchmarks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BenchmarkView"
+            }
+          }
+        }
+      },
+      "CompactResponse": {
+        "type": "object",
+        "required": [
+          "compacted",
+          "file_bytes_before",
+          "file_bytes_after",
+          "millis"
+        ],
+        "properties": {
+          "compacted": {
+            "type": "boolean",
+            "description": "`false`: there was nothing to reclaim."
+          },
+          "file_bytes_before": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "file_bytes_after": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "millis": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "CompressionSample": {
+        "type": "object",
+        "required": [
+          "sampled",
+          "stored_bytes",
+          "raw_bytes",
+          "ratio"
+        ],
+        "properties": {
+          "sampled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries decoded for the sample (the first ones in key order).",
+            "minimum": 0
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stored envelope bytes of the sample.",
+            "minimum": 0
+          },
+          "raw_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The same entries uncompressed (header + rmp payload).",
+            "minimum": 0
+          },
+          "ratio": {
+            "type": "number",
+            "format": "double",
+            "description": "`raw_bytes / stored_bytes`."
+          }
+        }
+      },
+      "ConfigField": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/FieldReport"
+          },
+          {
+            "type": "object",
+            "required": [
+              "overridable"
+            ],
+            "properties": {
+              "overridable": {
+                "type": "boolean",
+                "description": "Can be changed with `PUT /api/v1/config`."
+              }
+            }
+          }
+        ]
+      },
+      "ConfigView": {
+        "type": "object",
+        "required": [
+          "fields"
+        ],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConfigField"
+            }
+          }
+        }
+      },
+      "Counts": {
+        "type": "object",
+        "description": "Row tallies. `total = matched + no_match + tie + pending + failed`; `cached` counts\nthe answered rows that came from the cache rather than this job's upstream calls.",
+        "required": [
+          "total",
+          "cached",
+          "matched",
+          "no_match",
+          "tie",
+          "pending",
+          "failed"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cached": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "no_match": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "tie": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EntryDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntrySummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "benchmark_name",
+              "vintage_name"
+            ],
+            "properties": {
+              "json": {
+                "description": "The stored upstream JSON, verbatim: the `addressMatches` array (address\nsearches) or the `geographies` object (coordinates)."
+              },
+              "batch": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/BatchView"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "benchmark_name": {
+                "type": "string"
+              },
+              "vintage_name": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "EntryPage": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntrySummary"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass back as `cursor`; absent at the end. It is the last key *examined*, so\nfiltered pages may be short (even empty) while it still advances."
+          }
+        }
+      },
+      "EntrySource": {
+        "type": "string",
+        "description": "How an entry was produced.",
+        "enum": [
+          "Single",
+          "Batch",
+          "Job",
+          "Import",
+          "Confirmed"
+        ]
+      },
+      "EntrySummary": {
+        "type": "object",
+        "required": [
+          "key",
+          "status",
+          "source",
+          "views",
+          "created_at",
+          "verified_at",
+          "fresh",
+          "stored_bytes"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "source": {
+            "$ref": "#/components/schemas/EntrySource"
+          },
+          "views": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds.",
+            "minimum": 0
+          },
+          "verified_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds when it stops being fresh (absent: never expires).",
+            "minimum": 0
+          },
+          "fresh": {
+            "type": "boolean"
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ErrorRecord": {
+        "type": "object",
+        "required": [
+          "at",
+          "message"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "FieldReport": {
+        "type": "object",
+        "description": "Rendered view of one key.",
+        "required": [
+          "path",
+          "value",
+          "source",
+          "env",
+          "default",
+          "doc"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Source"
+          },
+          "env": {
+            "type": "string"
+          },
+          "default": {
+            "type": "string"
+          },
+          "doc": {
+            "type": "string"
+          }
+        }
+      },
+      "ImportError": {
+        "type": "object",
+        "required": [
+          "line",
+          "error"
+        ],
+        "properties": {
+          "line": {
+            "type": "integer",
+            "description": "1-based line number.",
+            "minimum": 0
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "ImportResponse": {
+        "type": "object",
+        "required": [
+          "format",
+          "records",
+          "invalid",
+          "errors"
+        ],
+        "properties": {
+          "format": {
+            "type": "string"
+          },
+          "records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Valid records restored (an existing newer entry is kept instead).",
+            "minimum": 0
+          },
+          "invalid": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportError"
+            },
+            "description": "The first invalid lines."
+          },
+          "job": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobView",
+                "description": "The warming job (`csv`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "JobKind": {
+        "type": "string",
+        "enum": [
+          "geocode",
+          "refresh_negatives",
+          "warm"
+        ]
+      },
+      "JobList": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobView"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "JobRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "return_type",
+          "search_type",
+          "benchmark_id",
+          "vintage_id",
+          "created_at",
+          "updated_at",
+          "totals",
+          "chunk_size",
+          "chunks_total",
+          "priority"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "UUIDv7: ids sort by creation time."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "return_type": {
+            "$ref": "#/components/schemas/ReturnType"
+          },
+          "search_type": {
+            "$ref": "#/components/schemas/SearchType"
+          },
+          "benchmark_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "vintage_id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The vintage in the cache keys (the benchmark default for `locations`).",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "totals": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "chunk_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "chunks_total": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "original_filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Higher runs first; ties run oldest first."
+          }
+        }
+      },
+      "JobState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "paused",
+          "cancelled",
+          "completed",
+          "failed"
+        ]
+      },
+      "JobUpload": {
+        "type": "object",
+        "description": "Multipart submission (documentation only; parsed by hand).",
+        "required": [
+          "returntype",
+          "benchmark"
+        ],
+        "properties": {
+          "addressFile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "binary",
+            "description": "`id, street, city, state, zip` (or `id, address` with `searchtype=onelineaddress`)."
+          },
+          "coordinatesFile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "binary",
+            "description": "`id, x, y`."
+          },
+          "returntype": {
+            "type": "string",
+            "description": "`locations` or `geographies`."
+          },
+          "searchtype": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`address` (default), `onelineaddress` or `coordinates`."
+          },
+          "benchmark": {
+            "type": "string"
+          },
+          "vintage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "JobView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/JobRecord"
+          },
+          {
+            "type": "object",
+            "required": [
+              "progress"
+            ],
+            "properties": {
+              "progress": {
+                "type": "number",
+                "format": "double",
+                "description": "Percent of rows answered or failed."
+              },
+              "eta_secs": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Estimated seconds left, from the upstream rate since the job started.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A job with derived progress."
+      },
+      "JsonRow": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "street"
+            ],
+            "properties": {
+              "id": {},
+              "street": {
+                "type": "string"
+              },
+              "city": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "zip": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "x",
+              "y"
+            ],
+            "properties": {
+              "id": {},
+              "x": {},
+              "y": {}
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "address"
+            ],
+            "properties": {
+              "id": {},
+              "address": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "`{id, street, city?, state?, zip?}`, `{id, x, y}` or `{id, address}`; ids and\ncoordinates may be strings or numbers."
+      },
+      "LaneView": {
+        "type": "object",
+        "required": [
+          "concurrency",
+          "available",
+          "sync_waiters"
+        ],
+        "properties": {
+          "concurrency": {
+            "type": "integer",
+            "description": "Configured concurrent requests.",
+            "minimum": 0
+          },
+          "available": {
+            "type": "integer",
+            "description": "Permits free right now.",
+            "minimum": 0
+          },
+          "sync_waiters": {
+            "type": "integer",
+            "description": "Live (`Sync`) callers queued for a permit.",
+            "minimum": 0
+          }
+        }
+      },
+      "PurgeRequest": {
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "description": "`all`, `expired`, `benchmark`, `vintage`, `status` or `prefix`."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`benchmark`: id or name; `vintage`: `benchmark:vintage` (ids or names);\n`status`: `Match`/`NoMatch`/`Tie`; `prefix`: the key prefix."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Count only."
+          }
+        }
+      },
+      "PurgeResponse": {
+        "type": "object",
+        "required": [
+          "scope",
+          "dry_run",
+          "matched"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries the scope selects (deleted unless `dry_run`).",
+            "minimum": 0
+          }
+        }
+      },
+      "RefreshRequest": {
+        "type": "object",
+        "properties": {
+          "benchmark": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vintage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      },
+      "RefreshResponse": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobView"
+            }
+          }
+        }
+      },
+      "ReturnType": {
+        "type": "string",
+        "enum": [
+          "locations",
+          "geographies"
+        ]
+      },
+      "SearchType": {
+        "type": "string",
+        "enum": [
+          "oneline",
+          "address",
+          "addressPR",
+          "coordinates"
+        ]
+      },
+      "Source": {
+        "type": "string",
+        "description": "Where the effective value of a key came from.",
+        "enum": [
+          "default",
+          "toml",
+          "env",
+          "flag",
+          "override"
+        ]
+      },
+      "StatsDetail": {
+        "type": "object",
+        "required": [
+          "by_status",
+          "by_searchtype",
+          "by_benchmark",
+          "undecodable"
+        ],
+        "properties": {
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "by_searchtype": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "by_benchmark": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "undecodable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries whose header cannot be read.",
+            "minimum": 0
+          },
+          "compression": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CompressionSample"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "Status": {
+        "type": "string",
+        "enum": [
+          "Match",
+          "NoMatch",
+          "Tie"
+        ]
+      },
+      "SubmitJson": {
+        "type": "object",
+        "description": "JSON submission: one row shape per job.",
+        "required": [
+          "returntype",
+          "benchmark",
+          "rows"
+        ],
+        "properties": {
+          "returntype": {
+            "type": "string"
+          },
+          "benchmark": {
+            "type": "string"
+          },
+          "vintage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JsonRow"
+            }
+          }
+        }
+      },
+      "SubmitResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "state",
+          "counts"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          }
+        }
+      },
+      "TableStatsView": {
+        "type": "object",
+        "required": [
+          "tree_height",
+          "leaf_pages",
+          "branch_pages",
+          "stored_bytes",
+          "metadata_bytes",
+          "fragmented_bytes"
+        ],
+        "properties": {
+          "tree_height": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "leaf_pages": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "branch_pages": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "metadata_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fragmented_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "UpstreamView": {
+        "type": "object",
+        "required": [
+          "breaker",
+          "single",
+          "batch",
+          "single_rps",
+          "single_burst",
+          "batch_min_interval_secs",
+          "singleflight_in_flight",
+          "recent_errors"
+        ],
+        "properties": {
+          "breaker": {
+            "$ref": "#/components/schemas/BreakerState"
+          },
+          "single": {
+            "$ref": "#/components/schemas/LaneView"
+          },
+          "batch": {
+            "$ref": "#/components/schemas/LaneView"
+          },
+          "single_rps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "single_burst": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "batch_min_interval_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "singleflight_in_flight": {
+            "type": "integer",
+            "description": "Distinct upstream fetches currently coalescing live requests.",
+            "minimum": 0
+          },
+          "last_ok_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds of the last non-transient upstream answer.",
+            "minimum": 0
+          },
+          "recent_errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorRecord"
+            }
+          }
+        }
+      },
+      "VintageView": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "is_default"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "default_layers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Layers returned when a request omits `layers` (absent: all stored layers)."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "jobs",
+      "description": "Durable async geocoding jobs"
+    },
+    {
+      "name": "cache",
+      "description": "Cache inspection and maintenance"
+    },
+    {
+      "name": "admin",
+      "description": "Catalog, runtime config and upstream state"
+    }
+  ]
+}

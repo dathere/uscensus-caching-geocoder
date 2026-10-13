@@ -1,0 +1,6 @@
+target/
+data/
+.git/
+.roborev/
+.serena/
+resources/samples/

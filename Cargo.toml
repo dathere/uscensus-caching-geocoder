@@ -1,0 +1,73 @@
+[package]
+name = "ucgeocoder"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Caching, rate-limited, wire-compatible proxy for the US Census Geocoder API"
+license = "AGPL-3.0-only"
+repository = "https://github.com/dathere/uscensus-caching-geocoder"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ucgeocoder"
+path = "src/main.rs"
+
+[features]
+default = []
+# xls/xlsx batch uploads.
+xlsx = ["dep:calamine"]
+
+[dependencies]
+anyhow = "1.0.104"
+arc-swap = "1.9.2"
+axum = { version = "0.8", features = ["multipart"] }
+bytes = "1.12.1"
+calamine = { version = "0.36", optional = true }
+clap = { version = "4", features = ["derive", "env"] }
+csv = "1.4.0"
+fastrand = "2.5.0"
+form_urlencoded = "1.2.2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+governor = "0.10"
+httpdate = "1.0.3"
+humantime = "2.4.0"
+indexmap = { version = "2.14.2", features = ["serde"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+mimalloc = "0.1.52"
+redb = "4"
+reqwest = { version = "0.13", features = ["multipart", "json", "query", "gzip", "brotli", "zstd"] }
+rmp-serde = "1"
+rust-embed = { version = "8", features = ["mime-guess"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11.19"
+serde_json = { version = "1.0.154", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
+thiserror = "2.0.21"
+tokio = { version = "1", features = ["full"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+utoipa = { version = "6", features = ["preserve_order", "preserve_path_order", "axum_extras"] }
+utoipa-axum = "0.3"
+utoipa-swagger-ui = { version = "10", default-features = false, features = ["axum", "vendored"] }
+uuid = { version = "1.28.0", features = ["v7"] }
+zstd = "0.14"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+cached = { version = "4", default-features = false, features = ["redb_store"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+futures-util = "0.3.34"
+http-body-util = "0.1.5"
+predicates = "3.1.4"
+serde_bytes = "0.11.19"
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
+wiremock = "0.6"
+
+[[bench]]
+name = "hot_path"
+harness = false

@@ -1,0 +1,319 @@
+{
+ "captured": "2026-10-12",
+ "benchmarks": {
+  "benchmarks": [
+   {
+    "isDefault": true,
+    "benchmarkDescription": "Public Address Ranges - Current Benchmark",
+    "id": "4",
+    "benchmarkName": "Public_AR_Current"
+   },
+   {
+    "isDefault": false,
+    "benchmarkDescription": "Public Address Ranges - ACS2026 Benchmark",
+    "id": "8",
+    "benchmarkName": "Public_AR_ACS2026"
+   },
+   {
+    "isDefault": true,
+    "benchmarkDescription": "Public Address Ranges - LUCA Benchmark",
+    "id": "11",
+    "benchmarkName": "Public_AR_LUCA"
+   },
+   {
+    "isDefault": false,
+    "benchmarkDescription": "Public Address Ranges - Census 2020 Benchmark",
+    "id": "2020",
+    "benchmarkName": "Public_AR_Census2020"
+   }
+  ]
+ },
+ "vintages": {
+  "4": {
+   "vintages": [
+    {
+     "isDefault": true,
+     "id": "4",
+     "vintageName": "Current_Current",
+     "vintageDescription": "Current Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "410",
+     "vintageName": "Census2010_Current",
+     "vintageDescription": "Census2010 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "417",
+     "vintageName": "ACS2017_Current",
+     "vintageDescription": "ACS2017 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "418",
+     "vintageName": "ACS2018_Current",
+     "vintageDescription": "ACS2018 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "419",
+     "vintageName": "ACS2019_Current",
+     "vintageDescription": "ACS2019 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "420",
+     "vintageName": "Census2020_Current",
+     "vintageDescription": "Census2020 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "421",
+     "vintageName": "ACS2021_Current",
+     "vintageDescription": "ACS2021 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "422",
+     "vintageName": "ACS2022_Current",
+     "vintageDescription": "ACS2022 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "423",
+     "vintageName": "ACS2023_Current",
+     "vintageDescription": "ACS2023 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "424",
+     "vintageName": "ACS2024_Current",
+     "vintageDescription": "ACS2024 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "425",
+     "vintageName": "ACS2025_Current",
+     "vintageDescription": "ACS2025 Vintage - Current Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "426",
+     "vintageName": "ACS2026_Current",
+     "vintageDescription": "ACS2026 Vintage - Current Benchmark"
+    }
+   ],
+   "selectedBenchmark": "4",
+   "benchmarks": [
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - Current Benchmark",
+     "id": "4",
+     "benchmarkName": "Public_AR_Current"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - ACS2026 Benchmark",
+     "id": "8",
+     "benchmarkName": "Public_AR_ACS2026"
+    },
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - LUCA Benchmark",
+     "id": "11",
+     "benchmarkName": "Public_AR_LUCA"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - Census 2020 Benchmark",
+     "id": "2020",
+     "benchmarkName": "Public_AR_Census2020"
+    }
+   ]
+  },
+  "8": {
+   "vintages": [
+    {
+     "isDefault": true,
+     "id": "8",
+     "vintageName": "Current_ACS2026",
+     "vintageDescription": "Current Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "810",
+     "vintageName": "Census2010_ACS2026",
+     "vintageDescription": "Census2010 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "817",
+     "vintageName": "ACS2017_ACS2026",
+     "vintageDescription": "ACS2017 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "818",
+     "vintageName": "ACS2018_ACS2026",
+     "vintageDescription": "ACS2018 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "819",
+     "vintageName": "ACS2019_ACS2026",
+     "vintageDescription": "ACS2019 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "820",
+     "vintageName": "Census2020_ACS2026",
+     "vintageDescription": "Census 2020 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "821",
+     "vintageName": "ACS2021_ACS2026",
+     "vintageDescription": "ACS2021 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "822",
+     "vintageName": "ACS2022_ACS2026",
+     "vintageDescription": "ACS2022 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "823",
+     "vintageName": "ACS2023_ACS2026",
+     "vintageDescription": "ACS2023 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "824",
+     "vintageName": "ACS2024_ACS2026",
+     "vintageDescription": "ACS2024 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "825",
+     "vintageName": "ACS2025_ACS2026",
+     "vintageDescription": "ACS2025 Vintage - ACS2026 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "826",
+     "vintageName": "ACS2026_ACS2026",
+     "vintageDescription": "ACS2026 Vintage - ACS2026 Benchmark"
+    }
+   ],
+   "selectedBenchmark": "8",
+   "benchmarks": [
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - Current Benchmark",
+     "id": "4",
+     "benchmarkName": "Public_AR_Current"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - ACS2026 Benchmark",
+     "id": "8",
+     "benchmarkName": "Public_AR_ACS2026"
+    },
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - LUCA Benchmark",
+     "id": "11",
+     "benchmarkName": "Public_AR_LUCA"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - Census 2020 Benchmark",
+     "id": "2020",
+     "benchmarkName": "Public_AR_Census2020"
+    }
+   ]
+  },
+  "11": {
+   "vintages": [
+    {
+     "isDefault": true,
+     "id": "11",
+     "vintageName": "LUCA_Current",
+     "vintageDescription": "Current Vintage - LUCA Benchmark"
+    }
+   ],
+   "selectedBenchmark": "11",
+   "benchmarks": [
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - Current Benchmark",
+     "id": "4",
+     "benchmarkName": "Public_AR_Current"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - ACS2026 Benchmark",
+     "id": "8",
+     "benchmarkName": "Public_AR_ACS2026"
+    },
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - LUCA Benchmark",
+     "id": "11",
+     "benchmarkName": "Public_AR_LUCA"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - Census 2020 Benchmark",
+     "id": "2020",
+     "benchmarkName": "Public_AR_Census2020"
+    }
+   ]
+  },
+  "2020": {
+   "vintages": [
+    {
+     "isDefault": true,
+     "id": "2020",
+     "vintageName": "Census2020_Census2020",
+     "vintageDescription": "Census 2020 Vintage - Census 2020 Benchmark"
+    },
+    {
+     "isDefault": false,
+     "id": "2010",
+     "vintageName": "Census2010_Census2020",
+     "vintageDescription": "Census 2010 Vintage - Census 2020 Benchmark"
+    }
+   ],
+   "selectedBenchmark": "2020",
+   "benchmarks": [
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - Current Benchmark",
+     "id": "4",
+     "benchmarkName": "Public_AR_Current"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - ACS2026 Benchmark",
+     "id": "8",
+     "benchmarkName": "Public_AR_ACS2026"
+    },
+    {
+     "isDefault": true,
+     "benchmarkDescription": "Public Address Ranges - LUCA Benchmark",
+     "id": "11",
+     "benchmarkName": "Public_AR_LUCA"
+    },
+    {
+     "isDefault": false,
+     "benchmarkDescription": "Public Address Ranges - Census 2020 Benchmark",
+     "id": "2020",
+     "benchmarkName": "Public_AR_Census2020"
+    }
+   ]
+  }
+ }
+}

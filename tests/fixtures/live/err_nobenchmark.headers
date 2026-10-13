@@ -1,0 +1,13 @@
+HTTP/1.1 400 
+Date: Mon, 12 Oct 2026 17:07:42 GMT
+Content-Type: application/json
+Content-Length: 57
+Connection: keep-alive
+X-Frame-Options: DENY
+Cache-Control: private, no-store
+Strict-Transport-Security: max-age=31536000
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1;mode=block
+Vary: Origin
+Set-Cookie: TS0193e6a1=01283c52a493c96c16d472372dfc714eecb3a00718dad30fa673ea03175ae1dea832d432af568cdc76ea3f90d749085a7529595f8f; Path=/; Domain=.geocoding.geo.census.gov; Secure; HttpOnly
+

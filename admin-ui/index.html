@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ucgeocoder admin</title>
+  <link rel="stylesheet" href="/admin/app.css">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">ucgeocoder</span>
+    <nav id="nav">
+      <a href="/admin/dashboard" data-tab="dashboard">Dashboard</a>
+      <a href="/admin/entries" data-tab="entries">Entries</a>
+      <a href="/admin/jobs" data-tab="jobs">Jobs</a>
+      <a href="/admin/config" data-tab="config">Config</a>
+      <a href="/admin/docs" data-tab="docs">Docs</a>
+    </nav>
+    <button type="button" id="signout" class="link" hidden>Forget token</button>
+  </header>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <main>
+    <section id="tab-dashboard" class="tab">
+      <div class="bar">
+        <h1>Dashboard</h1>
+        <span class="muted" id="dash-updated"></span>
+      </div>
+      <div class="cards" id="dash-cards"></div>
+      <div class="grid2">
+        <div class="panel">
+          <h2>Upstream</h2>
+          <dl id="dash-upstream" class="kv"></dl>
+          <h3>Recent errors</h3>
+          <ul id="dash-errors" class="plain"></ul>
+        </div>
+        <div class="panel">
+          <div class="bar">
+            <h2>Cache detail</h2>
+            <button type="button" id="dash-detail-refresh">Refresh</button>
+          </div>
+          <p class="muted">Full header scan; loaded when this tab opens and on Refresh.</p>
+          <dl id="dash-detail" class="kv"></dl>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Running jobs</h2>
+        <div id="dash-jobs"></div>
+      </div>
+    </section>
+
+    <section id="tab-entries" class="tab" hidden>
+      <h1>Entries</h1>
+      <form id="entries-filter" class="filters">
+        <label>Prefix <input name="prefix" placeholder="v1|address|4|"></label>
+        <label>Search type
+          <select name="searchtype">
+            <option value="">any</option>
+            <option>oneline</option><option>address</option>
+            <option>addressPR</option><option>coordinates</option>
+          </select>
+        </label>
+        <label>Benchmark <input name="benchmark" placeholder="4 or Public_AR_Current" size="18"></label>
+        <label>Status
+          <select name="status">
+            <option value="">any</option><option>Match</option><option>NoMatch</option><option>Tie</option>
+          </select>
+        </label>
+        <label>Page size <input name="limit" type="number" min="1" max="1000" value="50" size="5"></label>
+        <button type="submit">Search</button>
+      </form>
+      <div class="grid2 wide-left">
+        <div>
+          <div id="entries-list"></div>
+          <div class="bar">
+            <button type="button" id="entries-prev" disabled>Previous</button>
+            <span class="muted" id="entries-page"></span>
+            <button type="button" id="entries-next" disabled>Next</button>
+          </div>
+        </div>
+        <div class="panel" id="entry-detail"><p class="muted">Select an entry to inspect it.</p></div>
+      </div>
+    </section>
+
+    <section id="tab-jobs" class="tab" hidden>
+      <h1>Jobs</h1>
+      <div class="grid2">
+        <form id="job-upload" class="panel">
+          <h2>Upload a file</h2>
+          <label>File <input type="file" name="file" required></label>
+          <label>Search type
+            <select name="searchtype">
+              <option value="address">address (id, street, city, state, zip)</option>
+              <option value="onelineaddress">onelineaddress (id, address)</option>
+              <option value="coordinates">coordinates (id, x, y)</option>
+            </select>
+          </label>
+          <label>Return type
+            <select name="returntype"><option>locations</option><option>geographies</option></select>
+          </label>
+          <label>Benchmark <input name="benchmark" value="Public_AR_Current" required></label>
+          <label>Vintage <input name="vintage" placeholder="required for geographies"></label>
+          <label>Priority <input name="priority" type="number" value="0"></label>
+          <button type="submit">Submit job</button>
+        </form>
+        <form id="job-json" class="panel">
+          <h2>Paste JSON</h2>
+          <textarea name="body" rows="12" spellcheck="false">{
+  "returntype": "locations",
+  "benchmark": "Public_AR_Current",
+  "rows": [
+    {"id": 1, "street": "4600 Silver Hill Rd", "city": "Washington", "state": "DC", "zip": "20233"}
+  ]
+}</textarea>
+          <button type="submit">Submit job</button>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="bar">
+          <h2>All jobs</h2>
+          <button type="button" id="jobs-refresh-negatives">Refresh negatives now</button>
+        </div>
+        <div id="jobs-list"></div>
+      </div>
+    </section>
+
+    <section id="tab-config" class="tab" hidden>
+      <div class="bar">
+        <h1>Config</h1>
+        <button type="button" id="config-save" disabled>Save changes</button>
+      </div>
+      <p class="muted">Editable keys are applied immediately and persist across restarts. Others are fixed at startup.</p>
+      <div id="config-list"></div>
+    </section>
+
+    <section id="tab-docs" class="tab docs" hidden>
+      <iframe id="docs-frame" title="API documentation" data-src="/admin/docs/"></iframe>
+    </section>
+  </main>
+
+  <dialog id="token-dialog">
+    <form id="token-form" method="dialog">
+      <h2>Admin token</h2>
+      <p>This server requires its admin bearer token (<code>UCG_ADMIN_TOKEN</code>). It is kept in this browser's local storage.</p>
+      <p id="token-error" class="error" hidden></p>
+      <input type="password" name="token" autocomplete="off" required autofocus>
+      <button type="submit">Continue</button>
+    </form>
+  </dialog>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>
