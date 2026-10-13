@@ -403,8 +403,30 @@ Phases 0–10 are committed on `main`; the gate (`cargo fmt --check && cargo cli
 - When findings turn marginal (unreachable paths, never-observed upstream shapes, third+ round on the same code), stop and ask the user instead of fixing; they decide. Standing decision: import validation (`cache/maintenance.rs`) is bounded — further findings of that kind are closed as marginal.
 - Consult the advisor before each piece of design work and quote its output to the user in full. No session links in commits; `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` trailer.
 
+**In progress when the session ended: get the Docker image building** (user request after Phase 10).
+- State: nothing changed in the repo yet. Docker Desktop (CLI 29.3.1, context `desktop-linux`) is installed but its daemon was not running. `open -a Docker` started it, and it was waiting on a privileged macOS approval (osascript helper install) that only the user can answer. First step in a fresh session: `docker info` must succeed; if it does not, ask the user to approve or finish Docker Desktop's setup. Never enter credentials.
+- Steps:
+  1. `docker build --build-arg UCG_GIT_SHA=$(git rev-parse --short=12 HEAD) -t ucgeocoder .`
+  2. Fix what breaks. The Dockerfile is `rust:1.99-alpine` (musl) → `distroless/static-debian12:nonroot`.
+  3. Run `docker run --rm -p 18082:8080 -e UCG_ADMIN_TOKEN=<throwaway> ucgeocoder`, then curl `/healthz`, one live lookup (MISS then HIT), `/admin/` and `/api/v1/cache/stats` with the token.
+  4. Check `docker run --rm ucgeocoder check-config`, and that the `/data` volume is writable by `nonroot` (uid 65532).
+- Expected failure: reqwest 0.13's default TLS is aws-lc-rs (aws-lc-sys), which on Alpine likely needs `apk add cmake clang perl make` (maybe `linux-headers`), or a crt-static linking fix. Fallbacks, in order:
+  - (a) add those build packages;
+  - (b) build on `rust:1.99-slim` (glibc), runtime `distroless/cc-debian12`;
+  - (c) switch reqwest to `rustls` with the `ring` provider. This is a dependency change; ask the user first.
+
+  Keep the image static/distroless if possible; if (b) is used, say why.
+- Other things to verify:
+  - `resources/census.dict` and `admin-ui/` are compiled in (`COPY . .`; `.dockerignore` excludes `target`, `data`, `.git`, `.roborev`, `.serena`, `resources/samples`). `build.rs` asserts the dict exists.
+  - With `.git` excluded, the git sha comes only from `--build-arg UCG_GIT_SHA`.
+- Done when: the image builds from a clean checkout, and the container answers the checks above. Then:
+  - update README §Docker (remove "not built or tested") and this file (§13 note plus remove the Docker item below);
+  - consider adding a CI `docker build` job (no push);
+  - make one commit, then the roborev loop.
+- Also handed over: `e356fca` (live Tie row-shape check, roborev 5309 passed) is the last commit before this note.
+
 **Still open (not started, not blocking):**
-- The Docker image has never been built (no Docker on the dev machine); the musl/aws-lc-rs build likely needs extra packages (cmake, clang/perl) or a switch to `rustls` with the `ring` provider. Verify before advertising it.
+- The Docker image has never been built — now in progress, see above.
 - The release workflow and CI have only been `actionlint`ed; the first `v*` tag is their first real run. `cargo-deny` (`deny.toml`) has never been run locally.
 - `tests/live.rs` checks the Tie case by row shape only (batch Tie/No_Match answers are load-dependent upstream); the other cases are byte-exact and can flap only if Census changes its texts or data.
 - `.serena/logs/` was untracked at the start of the Phase 7–10 session and was deliberately left alone.
