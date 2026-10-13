@@ -29,6 +29,15 @@ jobs:
       - name: benches compile
         run: cargo bench --locked --no-run
 
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image (no push)
+        run: docker build --build-arg UCG_GIT_SHA="${GITHUB_SHA::12}" -t ucgeocoder .
+      - name: smoke
+        run: docker run --rm ucgeocoder check-config
+
   deny:
     runs-on: ubuntu-latest
     steps:

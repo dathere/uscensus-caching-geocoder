@@ -301,9 +301,11 @@ docker build --build-arg UCG_GIT_SHA=$(git rev-parse --short=12 HEAD) -t ucgeoco
 docker run -p 8080:8080 -v ucg-data:/data -e UCG_ADMIN_TOKEN=... ucgeocoder
 ```
 
-The Dockerfile (static musl build on a distroless image) has **not been built or tested
-yet**. In particular, the default TLS backend (aws-lc-rs) may need extra build tools on
-musl. Prefer the release binaries or `cargo build --release` until it is verified.
+The image is a static musl build on `distroless/static-debian12:nonroot` (about 10 MB).
+It runs as uid 65532 and keeps the cache in `/data`. A named volume inherits that
+ownership; a bind-mounted host directory must be writable by uid 65532. `.git` is not
+copied into the build, so the version string's git sha comes only from `UCG_GIT_SHA`.
+CI builds the image (without pushing it) on every push.
 
 ## Development
 
