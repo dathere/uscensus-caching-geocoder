@@ -80,7 +80,7 @@ jobs:
         id: package
         shell: bash
         run: |
-          name="ucgeocoder-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="ucgeocoder-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/ucgeocoder" README.md LICENSE ucgeocoder.example.toml "$name/"
           tar czf "$name.tar.gz" "$name"
