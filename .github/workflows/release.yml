@@ -3,10 +3,13 @@ name: Release
 # Push a `vX.Y.Z` tag matching Cargo.toml's version to build binaries and publish a
 # GitHub release. The musl targets are built in the same rust:1.99-alpine image the
 # Dockerfile uses (static binaries); Windows is not attempted yet.
+# A manual run (workflow_dispatch) is a dry run: it builds and uploads the tarballs as
+# workflow artifacts but never publishes a release.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,7 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: dry run from a branch
+        if: github.ref_type != 'tag'
+        run: echo "dry run from ${GITHUB_REF_NAME}; version check skipped"
       - name: tag matches Cargo.toml
+        if: github.ref_type == 'tag'
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
@@ -92,6 +99,8 @@ jobs:
 
   release:
     needs: build
+    # Only a tag push publishes; a manual run against a tag ref must not.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
