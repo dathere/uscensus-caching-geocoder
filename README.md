@@ -1,5 +1,7 @@
 # uscensus-caching-geocoder
 
+[![Crates.io](https://img.shields.io/crates/v/ucgeocoder.svg)](https://crates.io/crates/ucgeocoder)
+
 `ucgeocoder` is a caching, rate-limited, wire-compatible proxy for the free
 [US Census Geocoder](https://geocoding.geo.census.gov/geocoder/). It speaks the Census API
 unchanged, so any client (qsv, curl, R and Python packages) can use it by changing the base
